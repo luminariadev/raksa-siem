@@ -20,11 +20,13 @@ const (
 type OutputFormat string
 
 const (
-	FormatTable    OutputFormat = "table"
-	FormatJSON     OutputFormat = "json"
-	FormatSARIF    OutputFormat = "sarif"
-	FormatMarkdown OutputFormat = "markdown"
-	FormatNDJSON   OutputFormat = "ndjson"
+	FormatTable     OutputFormat = "table"
+	FormatJSON      OutputFormat = "json"
+	FormatSARIF     OutputFormat = "sarif"
+	FormatMarkdown  OutputFormat = "markdown"
+	FormatNDJSON    OutputFormat = "ndjson"
+	FormatHTML      OutputFormat = "html"
+	FormatAttackNav OutputFormat = "attack-nav"
 )
 
 // ParseFormat normalizes output format selection strings.
@@ -40,8 +42,12 @@ func ParseFormat(raw string) (OutputFormat, error) {
 		return FormatMarkdown, nil
 	case "ndjson":
 		return FormatNDJSON, nil
+	case "html", "htm":
+		return FormatHTML, nil
+	case "attack-nav", "navigator", "mitre-attack":
+		return FormatAttackNav, nil
 	default:
-		return "", fmt.Errorf("invalid output format %q: expected table, json, sarif, markdown, or ndjson", raw)
+		return "", fmt.Errorf("invalid output format %q: expected table, json, sarif, markdown, ndjson, html, or attack-nav", raw)
 	}
 }
 
@@ -58,6 +64,10 @@ func FormatReport(rep schema.Report, format OutputFormat) (string, error) {
 		return FormatMarkdownRender(rep), nil
 	case FormatNDJSON:
 		return FormatNDJSONRender(rep)
+	case FormatHTML:
+		return FormatHTMLRender(rep), nil
+	case FormatAttackNav:
+		return FormatAttackNavRender(rep)
 	default:
 		return "", fmt.Errorf("unsupported output format %q", format)
 	}

@@ -78,4 +78,40 @@ func TestSanitizeAndMultiFormatReport(t *testing.T) {
 	if err != nil || len(strings.Split(strings.TrimSpace(ndOut), "\n")) != 1 {
 		t.Fatalf("unexpected ndjson output: err=%v out=%q", err, ndOut)
 	}
+
+	// HTML output: verify XSS escaping, inline SVG graph, and zero external CDN script URLs
+	xssRep := schema.NewReport([]schema.Finding{
+		{
+			ID:          "siem-xss-1",
+			RuleID:      "SIEM-002",
+			Module:      "auth",
+			Layer:       schema.LayerName,
+			Severity:    schema.SeverityCritical,
+			Title:       "Brute-force <script>alert(1)</script>",
+			Description: "Source succeeded",
+			Target:      "host://app-01",
+			Evidence:    map[string]any{"src_ip": "198.51.100.10"},
+			Remediation: "Revoke key",
+			MitreD3FEND: "D3-UAL",
+			Timestamp:   time.Unix(1732700000, 0).UTC(),
+		},
+	})
+	htmlOut, err := FormatReport(xssRep, FormatHTML)
+	if err != nil {
+		t.Fatalf("html format failed: %v", err)
+	}
+	if strings.Contains(htmlOut, "<script>alert(1)</script>") {
+		t.Fatal("expected <script> inside finding title to be HTML-escaped")
+	}
+	if !strings.Contains(htmlOut, "<svg") || strings.Contains(htmlOut, "<script src=") || strings.Contains(htmlOut, "<link ") || strings.Contains(htmlOut, "https://") {
+		t.Fatalf("expected inline SVG with zero external assets")
+	}
+
+	navOut, err := FormatReport(xssRep, FormatAttackNav)
+	if err != nil {
+		t.Fatalf("attack-nav format failed: %v", err)
+	}
+	if !strings.Contains(navOut, `"enterprise-attack"`) || !strings.Contains(navOut, `"T1110"`) {
+		t.Fatalf("expected ATT&CK Navigator JSON with T1110, got:\n%s", navOut)
+	}
 }
