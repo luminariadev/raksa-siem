@@ -1,5 +1,14 @@
 # raksa-siem
 
+[![CI](https://github.com/luminariadev/raksa-siem/actions/workflows/ci.yml/badge.svg)](https://github.com/luminariadev/raksa-siem/actions/workflows/ci.yml)
+[![Release](https://github.com/luminariadev/raksa-siem/actions/workflows/release.yml/badge.svg)](https://github.com/luminariadev/raksa-siem/actions/workflows/release.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/luminariadev/raksa-siem)](https://github.com/luminariadev/raksa-siem/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
+[![Python SDK 3.11+](https://img.shields.io/badge/python%20sdk-3.11%2B-3776ab.svg)](sdk/python/README.md)
+[![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-4c1.svg)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+[![MCP](https://img.shields.io/badge/MCP-8%20tools-6f42c1.svg)](#mcp-server-integration-raksa-siem-mcp)
+
 Layer 6 (`observability-siem`) of the **Raksa Security Suite**: a fast, single-binary security log normalizer, cross-layer correlator, continuous tailer, authenticated ingest server, MCP tool server, and zero-dependency Python SDK.
 
 `raksa-siem` bridges host, network, web, DevSecOps, and IoC telemetry from upstream Raksa layers (`raksa-netguard`, `raksa-hostguard`, `raksa-webshield`, `raksa-pipeguard`, `raksa-iocscan`) and standard operational logs into Raksa Finding Schema v1 incidents, timelines, SARIF 2.1.0 reports, Prometheus metrics, and alert routes.
@@ -90,13 +99,27 @@ resp = client.ingest(events)
 | `BenchmarkCorrelateEvents-12` (1,000 events) | `0.46 ms` (`464,767 ns/op`, `1,537,986 B/op`, `54 allocs/op`) |
 | MCP stdio 51-frame burst (`initialize` + 50 calls) | `18.19 ms` total (`0.364 ms/call`) |
 | Python SDK (`1,000` nginx normalize + correlate) | `20.04 ms` (`0` external deps) |
-| Python SDK Wheel (`raksa_siem_sdk-0.1.0-py3-none-any.whl`) | `10,429` bytes |
+| Python SDK Wheel (`raksa_siem_sdk-0.1.0-py3-none-any.whl`) | `11,145` bytes |
+
+## MCP Server Integration (`raksa-siem mcp`)
+
+Launch `raksa-siem mcp` over stdio (JSON-RPC 2.0, `2 MiB` bounded line frames) to expose `8` tools to AI coding and security triage agents:
+
+- `siem_list_rules`: Catalog all 20 built-in `SIEM-*` rules and MITRE D3FEND mappings.
+- `siem_analyze_logs`: Normalize and correlate logs or inline telemetry into Finding Schema v1 reports.
+- `siem_correlate_reports`: Correlate upstream Layer 1-5 Raksa JSON/NDJSON reports across hosts and IPs.
+- `siem_normalize_events`: Parse mixed logs into canonical `schema.Event` JSON without triggering correlation.
+- `siem_build_timeline`: Generate a chronological incident timeline filtered by `src_ip`, `host`, `user`, or `layer`.
+- `siem_verify_rules`: Run fail-closed YAML/JSON policy, custom rule regex, waiver, and sink URL checks.
+- `siem_check_suppression`: Evaluate `(rule_id, group_key)` cooldown suppression windows.
+- `siem_query_incidents`: Query retained session incidents or an NDJSON incident store.
 
 ## Documentation & Examples
 
 - [Architecture Overview](docs/architecture.md)
 - [Threat Model](docs/threat-model.md)
 - [Changelog](CHANGELOG.md)
+- [Python SDK Guide](sdk/python/README.md)
 - [Example Policy](examples/raksa-siem.yml) & [Custom Detection Rules](examples/custom-rules.yml)
 
 ## License
