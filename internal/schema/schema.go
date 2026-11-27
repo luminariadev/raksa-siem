@@ -12,8 +12,8 @@ const (
 	LayerName     = "siem"
 )
 
-// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-siem/internal/schema.Version=0.2.0".
-var Version = "0.2.0"
+// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-siem/internal/schema.Version=0.3.0".
+var Version = "0.3.0"
 
 // Severity represents Raksa Schema v1 normalized alert severity levels.
 type Severity string
