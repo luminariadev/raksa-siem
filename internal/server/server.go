@@ -295,7 +295,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 func parseIngestPayload(body []byte, normFmt string) ([]schema.Event, error) {
 	trimmed := bytes.TrimSpace(body)
-	if normFmt == normalizer.FormatAuto && (bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("["))) {
+	if bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("[")) {
 		// Check structured envelope {"format": "...", "events": [...], "lines": [...], "raw": "..."}
 		var env struct {
 			Format string         `json:"format"`
@@ -304,8 +304,8 @@ func parseIngestPayload(body []byte, normFmt string) ([]schema.Event, error) {
 			Raw    string         `json:"raw"`
 			Tool   string         `json:"tool"`
 		}
-		if json.Unmarshal(trimmed, &env) == nil && env.Tool == "" {
-			subFmt := normalizer.FormatAuto
+		if json.Unmarshal(trimmed, &env) == nil && env.Tool == "" && (len(env.Events) > 0 || len(env.Lines) > 0 || strings.TrimSpace(env.Raw) != "") {
+			subFmt := normFmt
 			if strings.TrimSpace(env.Format) != "" {
 				parsed, err := normalizer.ParseFormat(env.Format)
 				if err != nil {
