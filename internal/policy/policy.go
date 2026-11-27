@@ -38,6 +38,8 @@ type Policy struct {
 	ThreatIntelPaths    []string           `yaml:"threat_intel_paths" json:"threat_intel_paths"`
 	AssetPaths          []string           `yaml:"asset_paths" json:"asset_paths"`
 	Assets              []intel.AssetEntry `yaml:"assets" json:"assets"`
+	DLQPath             string             `yaml:"dlq_path" json:"dlq_path,omitempty"`
+	MaxRetries          int                `yaml:"max_retries" json:"max_retries,omitempty"`
 	Routes              []AlertRoute       `yaml:"routes" json:"routes"`
 
 	baseDir      string              `yaml:"-" json:"-"`
@@ -114,6 +116,7 @@ func DefaultPolicy() Policy {
 		AuthBurstThreshold:  5,
 		WebProbeThreshold:   5,
 		AlertStormThreshold: 10,
+		MaxRetries:          3,
 	}
 }
 
@@ -336,16 +339,34 @@ func (p *Policy) ValidateAndCompile() error {
 	for idx := range p.Routes {
 		rt := &p.Routes[idx]
 		kind := strings.ToLower(strings.TrimSpace(rt.Type))
-		if !slices.Contains([]string{"webhook", "slack", "discord", "telegram", "file"}, kind) {
+		if !slices.Contains([]string{"webhook", "slack", "discord", "telegram", "file", "teams", "pagerduty", "opsgenie"}, kind) {
 			return fmt.Errorf("routes[%d]: unsupported route type %q", idx, rt.Type)
 		}
 		rt.Type = kind
-		if kind == "file" {
+		switch kind {
+		case "file":
 			if strings.TrimSpace(rt.Path) == "" {
 				return fmt.Errorf("routes[%d] (file): path is required", idx)
 			}
-		} else if err := ValidateHTTPSOrLocalhostURL(rt.URL); err != nil {
-			return fmt.Errorf("routes[%d] (%s): %w", idx, kind, err)
+		case "pagerduty", "opsgenie":
+			if strings.TrimSpace(rt.TokenEnv) == "" {
+				return fmt.Errorf("routes[%d] (%s): token_env is required", idx, kind)
+			}
+			if strings.TrimSpace(rt.URL) != "" {
+				if err := ValidateHTTPSOrLocalhostURL(rt.URL); err != nil {
+					return fmt.Errorf("routes[%d] (%s): %w", idx, kind, err)
+				}
+			}
+		case "telegram":
+			if strings.TrimSpace(rt.URL) != "" {
+				if err := ValidateHTTPSOrLocalhostURL(rt.URL); err != nil {
+					return fmt.Errorf("routes[%d] (%s): %w", idx, kind, err)
+				}
+			}
+		default:
+			if err := ValidateHTTPSOrLocalhostURL(rt.URL); err != nil {
+				return fmt.Errorf("routes[%d] (%s): %w", idx, kind, err)
+			}
 		}
 		if rt.MinSeverity == "" {
 			rt.MinSeverity = schema.SeverityMedium
@@ -356,6 +377,9 @@ func (p *Policy) ValidateAndCompile() error {
 			}
 			rt.MinSeverity = sev
 		}
+	}
+	if p.MaxRetries < 0 || p.MaxRetries > 5 {
+		return fmt.Errorf("invalid max_retries %d: must be between 0 and 5", p.MaxRetries)
 	}
 	return nil
 }

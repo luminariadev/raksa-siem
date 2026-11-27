@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -144,25 +145,47 @@ type DeliveryResult struct {
 	Target          string `json:"target"`
 	AlertCount      int    `json:"alert_count"`
 	SuppressedCount int    `json:"suppressed_count"`
+	Attempts        int    `json:"attempts,omitempty"`
 	Delivered       bool   `json:"delivered"`
+	DLQWritten      bool   `json:"dlq_written,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
 	StatusCode      int    `json:"status_code,omitempty"`
 	Error           string `json:"error,omitempty"`
 }
 
-// Router routes correlated SIEM findings to configured sinks with alert suppression.
+// DLQRecord captures a failed alert delivery batch for offline or scheduled replay.
+type DLQRecord struct {
+	FailedAt   string           `json:"failed_at"`
+	RouteName  string           `json:"route_name,omitempty"`
+	RouteType  string           `json:"route_type"`
+	Target     string           `json:"target"`
+	Suppressed int              `json:"suppressed"`
+	Error      string           `json:"error"`
+	Findings   []schema.Finding `json:"findings"`
+}
+
+// Router routes correlated SIEM findings to configured sinks with alert suppression, retry backoff, and DLQ.
 type Router struct {
 	Routes          []policy.AlertRoute
 	Tracker         *SuppressionTracker
 	HTTPClient      *http.Client
 	DryRun          bool
 	TelegramBaseURL string
+	PagerDutyURL    string
+	OpsgenieURL     string
+	DLQPath         string
+	MaxRetries      int
+	RetryBaseDelay  time.Duration
 }
 
 // NewRouter initializes a Router from a validated Policy.
 func NewRouter(pol policy.Policy, dryRun bool) *Router {
 	routes := make([]policy.AlertRoute, len(pol.Routes))
 	copy(routes, pol.Routes)
+	maxR := pol.MaxRetries
+	if maxR < 0 {
+		maxR = 0
+	}
 	return &Router{
 		Routes:  routes,
 		Tracker: NewSuppressionTracker(pol.SuppressionDuration()),
@@ -171,6 +194,11 @@ func NewRouter(pol policy.Policy, dryRun bool) *Router {
 		},
 		DryRun:          dryRun,
 		TelegramBaseURL: "https://api.telegram.org",
+		PagerDutyURL:    "https://events.pagerduty.com/v2/enqueue",
+		OpsgenieURL:     "https://api.opsgenie.com/v2/alerts",
+		DLQPath:         pol.DLQPath,
+		MaxRetries:      maxR,
+		RetryBaseDelay:  150 * time.Millisecond,
 	}
 }
 
@@ -205,6 +233,19 @@ func (r *Router) Deliver(ctx context.Context, findings []schema.Finding) ([]Deli
 		err := r.dispatchRoute(ctx, route, matched, suppressedCount, &res)
 		if err != nil {
 			res.Error = err.Error()
+			if !r.DryRun && strings.TrimSpace(r.DLQPath) != "" {
+				if dlqErr := appendDLQRecord(r.DLQPath, DLQRecord{
+					FailedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+					RouteName:  route.Name,
+					RouteType:  res.RouteType,
+					Target:     res.Target,
+					Suppressed: suppressedCount,
+					Error:      res.Error,
+					Findings:   matched,
+				}); dlqErr == nil {
+					res.DLQWritten = true
+				}
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -274,7 +315,11 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 		if r.DryRun {
 			return nil
 		}
-		return r.postJSON(ctx, route.URL, raw, sigHeader, res)
+		var headers map[string]string
+		if sigHeader != "" {
+			headers = map[string]string{"X-Raksa-Signature": sigHeader}
+		}
+		return r.postJSON(ctx, route.URL, raw, headers, res)
 
 	case "slack":
 		res.Target = route.URL
@@ -290,7 +335,7 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 		if r.DryRun {
 			return nil
 		}
-		return r.postJSON(ctx, route.URL, raw, "", res)
+		return r.postJSON(ctx, route.URL, raw, nil, res)
 
 	case "discord":
 		res.Target = route.URL
@@ -310,7 +355,7 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 		if r.DryRun {
 			return nil
 		}
-		return r.postJSON(ctx, route.URL, raw, "", res)
+		return r.postJSON(ctx, route.URL, raw, nil, res)
 
 	case "telegram":
 		res.Target = "telegram:" + route.ChatID
@@ -339,7 +384,108 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 		if r.DryRun {
 			return nil
 		}
-		return r.postJSON(ctx, endpoint, raw, "", res)
+		return r.postJSON(ctx, endpoint, raw, nil, res)
+
+	case "teams":
+		res.Target = route.URL
+		if err := ValidateSinkURL(route.URL); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(map[string]any{
+			"@type":      "MessageCard",
+			"@context":   "https://schema.org/extensions",
+			"summary":    fmt.Sprintf("raksa-siem detected %d incident(s)", len(findings)),
+			"themeColor": "DC2626",
+			"title":      fmt.Sprintf("[raksa-siem] %d Correlated Security Incident(s)", len(findings)),
+			"text":       formatAlertText(findings, suppressed),
+		})
+		if err != nil {
+			return err
+		}
+		if r.DryRun {
+			return nil
+		}
+		return r.postJSON(ctx, route.URL, raw, nil, res)
+
+	case "pagerduty":
+		endpoint := strings.TrimSpace(route.URL)
+		if endpoint == "" {
+			endpoint = r.PagerDutyURL
+		}
+		if endpoint == "" {
+			endpoint = "https://events.pagerduty.com/v2/enqueue"
+		}
+		res.Target = endpoint
+		if err := ValidateSinkURL(endpoint); err != nil {
+			return err
+		}
+		routingKey := os.Getenv(route.TokenEnv)
+		if routingKey == "" {
+			if r.DryRun {
+				return nil
+			}
+			return fmt.Errorf("pagerduty routing key env var %q is empty or unset", route.TokenEnv)
+		}
+		top := findings[0]
+		pdSev := mapPagerDutySeverity(top.Severity)
+		raw, err := json.Marshal(map[string]any{
+			"routing_key":  routingKey,
+			"event_action": "trigger",
+			"dedup_key":    top.RuleID + "|" + GroupKey(top),
+			"payload": map[string]any{
+				"summary":  formatAlertText(findings, suppressed),
+				"source":   GroupKey(top),
+				"severity": pdSev,
+				"component": schema.ToolName,
+				"group":    top.Module,
+				"class":    top.RuleID,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if r.DryRun {
+			return nil
+		}
+		return r.postJSON(ctx, endpoint, raw, nil, res)
+
+	case "opsgenie":
+		endpoint := strings.TrimSpace(route.URL)
+		if endpoint == "" {
+			endpoint = r.OpsgenieURL
+		}
+		if endpoint == "" {
+			endpoint = "https://api.opsgenie.com/v2/alerts"
+		}
+		res.Target = endpoint
+		if err := ValidateSinkURL(endpoint); err != nil {
+			return err
+		}
+		apiKey := os.Getenv(route.TokenEnv)
+		if apiKey == "" {
+			if r.DryRun {
+				return nil
+			}
+			return fmt.Errorf("opsgenie api key env var %q is empty or unset", route.TokenEnv)
+		}
+		top := findings[0]
+		raw, err := json.Marshal(map[string]any{
+			"message":     fmt.Sprintf("[%s] %s (%d incidents)", strings.ToUpper(string(top.Severity)), top.Title, len(findings)),
+			"alias":       top.RuleID + "|" + GroupKey(top),
+			"description": formatAlertText(findings, suppressed),
+			"priority":    mapOpsgeniePriority(top.Severity),
+			"source":      schema.ToolName,
+			"tags":        []string{"raksa-siem", top.RuleID, top.Module},
+		})
+		if err != nil {
+			return err
+		}
+		if r.DryRun {
+			return nil
+		}
+		return r.postJSON(ctx, endpoint, raw, map[string]string{
+			"Authorization": "GenieKey " + apiKey,
+		}, res)
 
 	case "file":
 		cleanPath := filepath.Clean(route.Path)
@@ -373,31 +519,178 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 	}
 }
 
-func (r *Router) postJSON(ctx context.Context, targetURL string, body []byte, signature string, res *DeliveryResult) error {
+func (r *Router) postJSON(ctx context.Context, targetURL string, body []byte, extraHeaders map[string]string, res *DeliveryResult) error {
 	client := r.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	baseDelay := r.RetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = 150 * time.Millisecond
+	}
+	totalAttempts := 1 + r.MaxRetries
+
+	var lastErr error
+	for attempt := 0; attempt < totalAttempts; attempt++ {
+		res.Attempts = attempt + 1
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "raksa-siem/"+schema.Version)
+		for k, v := range extraHeaders {
+			req.Header.Set(k, v)
+		}
+		resp, doErr := client.Do(req)
+		if doErr == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			res.StatusCode = resp.StatusCode
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return nil
+			}
+			lastErr = fmt.Errorf("sink returned HTTP %d", resp.StatusCode)
+			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+				return lastErr
+			}
+		} else {
+			lastErr = fmt.Errorf("post %s: %w", sanitizeTargetForErr(targetURL), doErr)
+		}
+
+		if attempt+1 < totalAttempts {
+			wait := baseDelay * time.Duration(1<<attempt)
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return lastErr
+}
+
+// ReplayDLQ attempts redelivery of failed DLQ batches stored in dlqPath and rewrites any remaining failures.
+func (r *Router) ReplayDLQ(ctx context.Context, dlqPath string) (replayed int, remaining int, err error) {
+	clean := filepath.Clean(dlqPath)
+	raw, readErr := os.ReadFile(clean)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return 0, 0, nil
+		}
+		return 0, 0, readErr
+	}
+	var pending []DLQRecord
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec DLQRecord
+		if json.Unmarshal([]byte(line), &rec) == nil && len(rec.Findings) > 0 {
+			pending = append(pending, rec)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return 0, 0, err
+	}
+
+	var kept [][]byte
+	for _, rec := range pending {
+		route, ok := r.findRouteForRecord(rec)
+		if !ok {
+			rawLine, _ := json.Marshal(rec)
+			kept = append(kept, rawLine)
+			remaining++
+			continue
+		}
+		var res DeliveryResult
+		if err := r.dispatchRoute(ctx, route, rec.Findings, rec.Suppressed, &res); err != nil {
+			rec.Error = err.Error()
+			rawLine, _ := json.Marshal(rec)
+			kept = append(kept, rawLine)
+			remaining++
+		} else {
+			replayed++
+		}
+	}
+
+	if len(kept) == 0 {
+		_ = os.WriteFile(clean, []byte{}, 0o600)
+		return replayed, 0, nil
+	}
+	var out bytes.Buffer
+	for _, k := range kept {
+		out.Write(k)
+		out.WriteByte('\n')
+	}
+	if writeErr := os.WriteFile(clean, out.Bytes(), 0o600); writeErr != nil {
+		return replayed, remaining, writeErr
+	}
+	return replayed, remaining, nil
+}
+
+func (r *Router) findRouteForRecord(rec DLQRecord) (policy.AlertRoute, bool) {
+	for _, rt := range r.Routes {
+		if rec.RouteName != "" && rt.Name == rec.RouteName {
+			return rt, true
+		}
+		if strings.EqualFold(rt.Type, rec.RouteType) {
+			return rt, true
+		}
+	}
+	return policy.AlertRoute{}, false
+}
+
+func appendDLQRecord(dlqPath string, rec DLQRecord) error {
+	clean := filepath.Clean(dlqPath)
+	if dir := filepath.Dir(clean); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "raksa-siem/"+schema.Version)
-	if signature != "" {
-		req.Header.Set("X-Raksa-Signature", signature)
-	}
-	resp, err := client.Do(req)
+	defer f.Close()
+	raw, err := json.Marshal(rec)
 	if err != nil {
-		return fmt.Errorf("post %s: %w", sanitizeTargetForErr(targetURL), err)
+		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	res.StatusCode = resp.StatusCode
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("sink returned HTTP %d", resp.StatusCode)
+	_, err = f.Write(append(raw, '\n'))
+	return err
+}
+
+func mapPagerDutySeverity(sev schema.Severity) string {
+	switch sev {
+	case schema.SeverityCritical:
+		return "critical"
+	case schema.SeverityHigh:
+		return "error"
+	case schema.SeverityMedium:
+		return "warning"
+	default:
+		return "info"
 	}
-	return nil
+}
+
+func mapOpsgeniePriority(sev schema.Severity) string {
+	switch sev {
+	case schema.SeverityCritical:
+		return "P1"
+	case schema.SeverityHigh:
+		return "P2"
+	case schema.SeverityMedium:
+		return "P3"
+	case schema.SeverityLow:
+		return "P4"
+	default:
+		return "P5"
+	}
 }
 
 func sanitizeTargetForErr(raw string) string {
