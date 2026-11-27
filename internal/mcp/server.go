@@ -14,6 +14,7 @@ import (
 
 	"github.com/luminariadev/raksa-siem/internal/correlator"
 	"github.com/luminariadev/raksa-siem/internal/intel"
+	"github.com/luminariadev/raksa-siem/internal/ledger"
 	"github.com/luminariadev/raksa-siem/internal/normalizer"
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/router"
@@ -310,6 +311,33 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				"required": []string{"threat_intel_paths"},
 			},
 		},
+		{
+			Name:        "siem_verify_ledger",
+			Description: "Verify cryptographic SHA-256 hash-chain integrity across an audit ledger directory.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dir": map[string]any{"type": "string", "description": "Path to segmented ledger directory"},
+				},
+				"required": []string{"dir"},
+			},
+		},
+		{
+			Name:        "siem_triage_case",
+			Description: "Update analyst triage status, assignment, and audit note on a SIEM finding case in the ledger.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dir":        map[string]any{"type": "string", "description": "Path to segmented ledger directory"},
+					"finding_id": map[string]any{"type": "string"},
+					"status":     map[string]any{"type": "string", "description": "open, ack, resolved, or false_positive"},
+					"assignee":   map[string]any{"type": "string"},
+					"author":     map[string]any{"type": "string"},
+					"note":       map[string]any{"type": "string"},
+				},
+				"required": []string{"dir", "finding_id", "status"},
+			},
+		},
 	}
 }
 
@@ -402,6 +430,12 @@ func (s *Server) callTool(name string, args map[string]any) toolCallResult {
 
 	case "siem_match_threat_intel":
 		return s.toolMatchThreatIntel(args)
+
+	case "siem_verify_ledger":
+		return s.toolVerifyLedger(args)
+
+	case "siem_triage_case":
+		return s.toolTriageCase(args)
 
 	default:
 		return errTool("unknown tool: " + name)
@@ -714,6 +748,36 @@ func (s *Server) toolMatchThreatIntel(args map[string]any) toolCallResult {
 		"match_count":       len(hits),
 		"matches":           hits,
 	})
+}
+
+func (s *Server) toolVerifyLedger(args map[string]any) toolCallResult {
+	dir := strArg(args, "dir")
+	if dir == "" {
+		return errTool("dir is required")
+	}
+	rep, err := ledger.VerifyDir(dir)
+	if err != nil {
+		return errTool(err.Error())
+	}
+	return okJSON(rep)
+}
+
+func (s *Server) toolTriageCase(args map[string]any) toolCallResult {
+	dir := strArg(args, "dir")
+	findingID := strArg(args, "finding_id")
+	status := strArg(args, "status")
+	if dir == "" || findingID == "" || status == "" {
+		return errTool("dir, finding_id, and status are required")
+	}
+	l, err := ledger.Open(dir, 0)
+	if err != nil {
+		return errTool(err.Error())
+	}
+	rec, err := l.UpdateCase(findingID, status, strArg(args, "assignee"), strArg(args, "author"), strArg(args, "note"))
+	if err != nil {
+		return errTool(err.Error())
+	}
+	return okJSON(rec)
 }
 
 func strSliceArg(args map[string]any, key string) []string {

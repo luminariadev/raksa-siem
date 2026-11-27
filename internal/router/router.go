@@ -433,12 +433,12 @@ func (r *Router) dispatchRoute(ctx context.Context, route policy.AlertRoute, fin
 			"event_action": "trigger",
 			"dedup_key":    top.RuleID + "|" + GroupKey(top),
 			"payload": map[string]any{
-				"summary":  formatAlertText(findings, suppressed),
-				"source":   GroupKey(top),
-				"severity": pdSev,
+				"summary":   formatAlertText(findings, suppressed),
+				"source":    GroupKey(top),
+				"severity":  pdSev,
 				"component": schema.ToolName,
-				"group":    top.Module,
-				"class":    top.RuleID,
+				"group":     top.Module,
+				"class":     top.RuleID,
 			},
 		})
 		if err != nil {

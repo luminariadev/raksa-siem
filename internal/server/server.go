@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/luminariadev/raksa-siem/internal/correlator"
+	"github.com/luminariadev/raksa-siem/internal/ledger"
 	"github.com/luminariadev/raksa-siem/internal/normalizer"
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/router"
@@ -27,18 +30,27 @@ import (
 
 const maxIngestBodyBytes = 2 << 20 // 2 MiB
 
-// Config configures the HTTP SIEM ingestion and incident query server.
+// Config configures the HTTP/TLS/Syslog SIEM ingestion, ledger, RBAC, and query server.
 type Config struct {
-	Addr           string
-	SyslogUDPAddr  string
-	SyslogTCPAddr  string
-	OnSyslogListen func(proto, addr string)
-	Policy         policy.Policy
-	StorePath      string
-	APIKeyEnv      string
-	MaxEvents      int
-	MaxIncidents   int
-	DryRunAlerts   bool
+	Addr            string
+	SyslogUDPAddr   string
+	SyslogTCPAddr   string
+	OnSyslogListen  func(proto, addr string)
+	Policy          policy.Policy
+	PolicyPath      string
+	StorePath       string
+	LedgerDir       string
+	RetentionDays   int
+	TLSCertFile     string
+	TLSKeyFile      string
+	TLSClientCAFile string
+	APIKeyEnv       string
+	IngestKeyEnv    string
+	ReadKeyEnv      string
+	AdminKeyEnv     string
+	MaxEvents       int
+	MaxIncidents    int
+	DryRunAlerts    bool
 }
 
 type storeRecord struct {
@@ -48,14 +60,17 @@ type storeRecord struct {
 }
 
 // Server exposes authenticated REST endpoints for ingesting events, querying incidents,
-// posture scoring, chronological timelines, health checks, and Prometheus metrics.
+// historical ledger search, case triage, tamper verification, posture scoring, and metrics.
 type Server struct {
 	cfg        Config
 	pol        policy.Policy
-	apiKey     string
+	adminKey   string
+	ingestKey  string
+	readKey    string
 	mu         sync.Mutex
 	engine     *correlator.Engine
 	router     *router.Router
+	ledger     *ledger.Ledger
 	events     []schema.Event
 	incidents  []schema.Finding
 	suppressed int
@@ -63,7 +78,7 @@ type Server struct {
 	syslogTCP  atomic.Int64
 }
 
-// New initializes a Server, failing closed if APIKeyEnv is named but unset.
+// New initializes a Server, failing closed if configured key env vars are unset or ledger verification fails.
 func New(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.Addr) == "" {
 		cfg.Addr = "127.0.0.1:8484"
@@ -78,20 +93,59 @@ func New(cfg Config) (*Server, error) {
 	if err := pol.ValidateAndCompile(); err != nil {
 		return nil, err
 	}
-	var apiKey string
-	if strings.TrimSpace(cfg.APIKeyEnv) != "" {
-		apiKey = os.Getenv(strings.TrimSpace(cfg.APIKeyEnv))
-		if apiKey == "" {
-			return nil, fmt.Errorf("API key environment variable %q is empty or unset (fail-closed)", cfg.APIKeyEnv)
+
+	readEnvKey := func(envName string) (string, error) {
+		name := strings.TrimSpace(envName)
+		if name == "" {
+			return "", nil
+		}
+		val := os.Getenv(name)
+		if val == "" {
+			return "", fmt.Errorf("API key environment variable %q is empty or unset (fail-closed)", name)
+		}
+		return val, nil
+	}
+
+	adminKey, err := readEnvKey(cfg.AdminKeyEnv)
+	if err != nil {
+		return nil, err
+	}
+	legacyAPIKey, err := readEnvKey(cfg.APIKeyEnv)
+	if err != nil {
+		return nil, err
+	}
+	if adminKey == "" {
+		adminKey = legacyAPIKey
+	}
+	ingestKey, err := readEnvKey(cfg.IngestKeyEnv)
+	if err != nil {
+		return nil, err
+	}
+	readKey, err := readEnvKey(cfg.ReadKeyEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	var ld *ledger.Ledger
+	if strings.TrimSpace(cfg.LedgerDir) != "" {
+		ld, err = ledger.Open(cfg.LedgerDir, cfg.RetentionDays)
+		if err != nil {
+			return nil, err
 		}
 	}
 
 	s := &Server{
-		cfg:    cfg,
-		pol:    pol,
-		apiKey: apiKey,
-		engine: correlator.NewEngine(pol),
-		router: router.NewRouter(pol, cfg.DryRunAlerts),
+		cfg:       cfg,
+		pol:       pol,
+		adminKey:  adminKey,
+		ingestKey: ingestKey,
+		readKey:   readKey,
+		engine:    correlator.NewEngine(pol),
+		router:    router.NewRouter(pol, cfg.DryRunAlerts),
+		ledger:    ld,
+	}
+	if _, tlsErr := s.BuildTLSConfig(); tlsErr != nil {
+		return nil, tlsErr
 	}
 	if strings.TrimSpace(cfg.StorePath) != "" {
 		if err := s.loadStore(cfg.StorePath); err != nil {
@@ -101,19 +155,60 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// Handler returns the configured HTTP handler with all SIEM endpoints registered.
+// BuildTLSConfig constructs optional TLS 1.2+ and client mTLS config from Config certificate paths.
+func (s *Server) BuildTLSConfig() (*tls.Config, error) {
+	certPath := strings.TrimSpace(s.cfg.TLSCertFile)
+	keyPath := strings.TrimSpace(s.cfg.TLSKeyFile)
+	caPath := strings.TrimSpace(s.cfg.TLSClientCAFile)
+	if certPath == "" && keyPath == "" {
+		if caPath != "" {
+			return nil, errors.New("tls client CA provided without tls cert/key pair")
+		}
+		return nil, nil
+	}
+	if certPath == "" || keyPath == "" {
+		return nil, errors.New("both tls_cert and tls_key must be provided")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS keypair: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}
+	if caPath != "" {
+		caBytes, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read client CA %q: %w", caPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caBytes) {
+			return nil, fmt.Errorf("no valid PEM certificates in client CA %q", caPath)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tlsCfg, nil
+}
+
+// Handler returns the configured HTTP handler with all SIEM endpoints and scoped RBAC registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/metrics", s.handleMetrics)
-	mux.HandleFunc("/api/v1/ingest", s.withAuth(s.handleIngest))
-	mux.HandleFunc("/api/v1/incidents", s.withAuth(s.handleIncidents))
-	mux.HandleFunc("/api/v1/posture", s.withAuth(s.handlePosture))
-	mux.HandleFunc("/api/v1/timeline", s.withAuth(s.handleTimeline))
+	mux.HandleFunc("/api/v1/ingest", s.requireScope("ingest", s.handleIngest))
+	mux.HandleFunc("/api/v1/incidents", s.requireScope("read", s.handleIncidents))
+	mux.HandleFunc("/api/v1/posture", s.requireScope("read", s.handlePosture))
+	mux.HandleFunc("/api/v1/timeline", s.requireScope("read", s.handleTimeline))
+	mux.HandleFunc("/api/v1/search", s.requireScope("read", s.handleSearch))
+	mux.HandleFunc("/api/v1/ledger/verify", s.requireScope("read", s.handleLedgerVerify))
+	mux.HandleFunc("/api/v1/cases", s.handleCasesDispatch)
+	mux.HandleFunc("/api/v1/reload", s.requireScope("admin", s.handleReload))
 	return mux
 }
 
-// ListenAndServe runs the HTTP server and optional Syslog UDP/TCP receivers until ctx is canceled.
+// ListenAndServe runs HTTP/TLS and optional Syslog UDP/TCP receivers plus SIGHUP policy reload until ctx exits.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	stopSyslog, err := s.StartSyslog(ctx)
 	if err != nil {
@@ -121,9 +216,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	defer stopSyslog()
 
+	registerReloadSignal(ctx, func() {
+		if strings.TrimSpace(s.cfg.PolicyPath) != "" {
+			_ = s.ReloadPolicy(s.cfg.PolicyPath)
+		}
+	})
+
+	tlsCfg, err := s.BuildTLSConfig()
+	if err != nil {
+		return err
+	}
+
 	httpSrv := &http.Server{
 		Addr:              s.cfg.Addr,
 		Handler:           s.Handler(),
+		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -133,8 +240,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+		var serveErr error
+		if tlsCfg != nil {
+			serveErr = httpSrv.ListenAndServeTLS("", "")
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			errCh <- serveErr
 		}
 		close(errCh)
 	}()
@@ -150,22 +263,45 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) requireScope(requiredScope string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey != "" {
-			presented := strings.TrimSpace(r.Header.Get("X-API-Key"))
-			if presented == "" {
-				authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
-				if len(authHdr) > 7 && strings.EqualFold(authHdr[:7], "Bearer ") {
-					presented = strings.TrimSpace(authHdr[7:])
-				}
+		authActive := s.adminKey != "" || s.ingestKey != "" || s.readKey != ""
+		if !authActive {
+			next(w, r)
+			return
+		}
+		presented := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		if presented == "" {
+			authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+			if len(authHdr) > 7 && strings.EqualFold(authHdr[:7], "Bearer ") {
+				presented = strings.TrimSpace(authHdr[7:])
 			}
-			if !constantTimeEqual(presented, s.apiKey) {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{
-					"error": "unauthorized: valid X-API-Key or Authorization Bearer token required",
-				})
-				return
-			}
+		}
+		if presented == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "unauthorized: valid X-API-Key or Authorization Bearer token required",
+			})
+			return
+		}
+
+		isAdmin := constantTimeEqual(presented, s.adminKey)
+		isIngest := constantTimeEqual(presented, s.ingestKey)
+		isRead := constantTimeEqual(presented, s.readKey)
+		if !isAdmin && !isIngest && !isRead {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "unauthorized: unrecognized API token",
+			})
+			return
+		}
+
+		allowed := isAdmin ||
+			(requiredScope == "ingest" && isIngest) ||
+			(requiredScope == "read" && isRead)
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("forbidden: scope %q required", requiredScope),
+			})
+			return
 		}
 		next(w, r)
 	}
@@ -228,10 +364,36 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# TYPE raksa_siem_syslog_received_total counter\n")
 	fmt.Fprintf(&b, "raksa_siem_syslog_received_total{proto=\"udp\"} %d\n", s.syslogUDP.Load())
 	fmt.Fprintf(&b, "raksa_siem_syslog_received_total{proto=\"tcp\"} %d\n", s.syslogTCP.Load())
+	if s.ledger != nil {
+		entries, _, counts := s.ledger.Stats()
+		fmt.Fprintf(&b, "# HELP raksa_siem_ledger_entries_total Total tamper-evident hash-chained ledger entries.\n")
+		fmt.Fprintf(&b, "# TYPE raksa_siem_ledger_entries_total counter\n")
+		fmt.Fprintf(&b, "raksa_siem_ledger_entries_total %d\n", entries)
+		fmt.Fprintf(&b, "# HELP raksa_siem_cases_by_status Tracked incident cases by triage status.\n")
+		fmt.Fprintf(&b, "# TYPE raksa_siem_cases_by_status gauge\n")
+		for _, st := range []string{ledger.StatusOpen, ledger.StatusAck, ledger.StatusResolved, ledger.StatusFalsePositive} {
+			fmt.Fprintf(&b, "raksa_siem_cases_by_status{status=%q} %d\n", st, counts[st])
+		}
+	}
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// IngestEvents runs normalized events through the correlator, policy, alert router, and persistence store.
+// ReloadPolicy atomically reloads and compiles a policy file for the running server engine and router.
+func (s *Server) ReloadPolicy(policyPath string) error {
+	pol, err := policy.LoadPolicy(policyPath)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.pol = pol
+	s.cfg.PolicyPath = policyPath
+	s.engine = correlator.NewEngine(pol)
+	s.router = router.NewRouter(pol, s.cfg.DryRunAlerts)
+	s.mu.Unlock()
+	return nil
+}
+
+// IngestEvents runs normalized events through the correlator, policy, alert router, store, and hash-chained ledger.
 func (s *Server) IngestEvents(ctx context.Context, events []schema.Event) ([]schema.Finding, int, *schema.PostureScore) {
 	var emitted []schema.Finding
 	var suppressed int
@@ -250,10 +412,11 @@ func (s *Server) IngestEvents(ctx context.Context, events []schema.Event) ([]sch
 
 	allIncidents := make([]schema.Finding, len(s.incidents))
 	copy(allIncidents, s.incidents)
+	rt := s.router
 	s.mu.Unlock()
 
 	if len(filtered) > 0 {
-		results, _ := s.router.Deliver(ctx, filtered)
+		results, _ := rt.Deliver(ctx, filtered)
 		for _, res := range results {
 			if res.SuppressedCount > 0 {
 				s.mu.Lock()
@@ -267,6 +430,10 @@ func (s *Server) IngestEvents(ctx context.Context, events []schema.Event) ([]sch
 
 	if strings.TrimSpace(s.cfg.StorePath) != "" && (len(events) > 0 || len(filtered) > 0) {
 		_ = s.appendStore(s.cfg.StorePath, events, filtered)
+	}
+	if s.ledger != nil {
+		_ = s.ledger.AppendEvents(events)
+		_ = s.ledger.AppendFindings(filtered)
 	}
 
 	rep := schema.NewReport(allIncidents)
@@ -479,6 +646,151 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 
 	tl := correlator.BuildTimeline(evCopy, filter)
 	writeJSON(w, http.StatusOK, tl)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.ledger == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "historical search requires --ledger-dir"})
+		return
+	}
+	q := r.URL.Query()
+	var fromT, toT time.Time
+	if raw := strings.TrimSpace(q.Get("from")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid 'from' timestamp (expected RFC3339)"})
+			return
+		}
+		fromT = t
+	}
+	if raw := strings.TrimSpace(q.Get("to")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid 'to' timestamp (expected RFC3339)"})
+			return
+		}
+		toT = t
+	}
+
+	res, err := s.ledger.Search(ledger.SearchQuery{
+		From:     fromT,
+		To:       toT,
+		Kind:     strings.TrimSpace(q.Get("kind")),
+		Query:    strings.TrimSpace(q.Get("query")),
+		Severity: strings.TrimSpace(q.Get("severity")),
+		RuleID:   strings.TrimSpace(q.Get("rule_id")),
+		Layer:    strings.TrimSpace(q.Get("layer")),
+		Host:     strings.TrimSpace(q.Get("host")),
+		SrcIP:    strings.TrimSpace(q.Get("src_ip")),
+		User:     strings.TrimSpace(q.Get("user")),
+		Limit:    parsePositiveLimit(q.Get("limit"), 200, 2000),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleLedgerVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.ledger == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ledger verification requires --ledger-dir"})
+		return
+	}
+	rep, err := s.ledger.Verify()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	status := http.StatusOK
+	if !rep.Valid {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, rep)
+}
+
+func (s *Server) handleCasesDispatch(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.requireScope("read", s.handleCasesGet)(w, r)
+	case http.MethodPost:
+		s.requireScope("admin", s.handleCasesPost)(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed; use GET or POST"})
+	}
+}
+
+func (s *Server) handleCasesGet(w http.ResponseWriter, r *http.Request) {
+	if s.ledger == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "case workflow requires --ledger-dir"})
+		return
+	}
+	cases := s.ledger.ListCases(r.URL.Query().Get("status"))
+	if cases == nil {
+		cases = []ledger.CaseRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total": len(cases),
+		"cases": cases,
+	})
+}
+
+func (s *Server) handleCasesPost(w http.ResponseWriter, r *http.Request) {
+	if s.ledger == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "case workflow requires --ledger-dir"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
+	var req struct {
+		FindingID string `json:"finding_id"`
+		Status    string `json:"status"`
+		Assignee  string `json:"assignee"`
+		Author    string `json:"author"`
+		Note      string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid case update JSON: " + err.Error()})
+		return
+	}
+	rec, err := s.ledger.UpdateCase(req.FindingID, req.Status, req.Assignee, req.Author, req.Note)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed; use POST"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var body struct {
+		PolicyPath string `json:"policy_path"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	target := strings.TrimSpace(body.PolicyPath)
+	if target == "" {
+		target = strings.TrimSpace(s.cfg.PolicyPath)
+	}
+	if target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no policy_path configured or supplied"})
+		return
+	}
+	if err := s.ReloadPolicy(target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "policy_path": target})
 }
 
 func (s *Server) appendEventLocked(ev schema.Event) {

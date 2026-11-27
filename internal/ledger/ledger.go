@@ -102,8 +102,8 @@ type SearchQuery struct {
 
 // SearchResult aggregates matching historical entries returned by Search.
 type SearchResult struct {
-	Total   int              `json:"total"`
-	Events  []schema.Event   `json:"events,omitempty"`
+	Total    int              `json:"total"`
+	Events   []schema.Event   `json:"events,omitempty"`
 	Findings []schema.Finding `json:"findings,omitempty"`
 }
 
@@ -574,6 +574,14 @@ func (l *Ledger) Search(q SearchQuery) (SearchResult, error) {
 	}
 	needle := strings.ToLower(strings.TrimSpace(q.Query))
 	kindFilter := strings.ToLower(strings.TrimSpace(q.Kind))
+	switch kindFilter {
+	case "events":
+		kindFilter = "event"
+	case "findings":
+		kindFilter = "finding"
+	case "cases":
+		kindFilter = "case"
+	}
 
 	var res SearchResult
 	for _, segPath := range segments {

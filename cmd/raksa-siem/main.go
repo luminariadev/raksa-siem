@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/luminariadev/raksa-siem/internal/correlator"
+	"github.com/luminariadev/raksa-siem/internal/ledger"
 	"github.com/luminariadev/raksa-siem/internal/mcp"
 	"github.com/luminariadev/raksa-siem/internal/normalizer"
 	"github.com/luminariadev/raksa-siem/internal/policy"
@@ -52,6 +53,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdVerifyRules(rest, stdout, stderr)
 	case "verify-sigma":
 		return cmdVerifySigma(rest, stdout, stderr)
+	case "verify-ledger":
+		return cmdVerifyLedger(rest, stdout, stderr)
+	case "case":
+		return cmdCase(rest, stdout, stderr)
 	case "test-alert":
 		return cmdTestAlert(rest, stdout, stderr)
 	case "rules":
@@ -75,17 +80,19 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: raksa-siem <subcommand> [flags] [paths...]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Subcommands:")
-	fmt.Fprintln(w, "  analyze       Normalize multi-format logs/reports and correlate SIEM incidents")
-	fmt.Fprintln(w, "  correlate     Correlate upstream Raksa Layer 1-5 Finding JSON/NDJSON reports")
-	fmt.Fprintln(w, "  normalize     Convert multi-format telemetry into canonical Raksa Event JSON")
-	fmt.Fprintln(w, "  watch         Continuously tail log files/dirs and route correlated alerts")
-	fmt.Fprintln(w, "  serve         Run HTTP ingest/query API and optional Syslog UDP/TCP receivers")
-	fmt.Fprintln(w, "  verify-rules  Validate .raksa-siem.yml policy, sequence rules, waivers, and sinks")
-	fmt.Fprintln(w, "  verify-sigma  Compile and validate native Sigma YAML detection rules")
-	fmt.Fprintln(w, "  test-alert    Dispatch a synthetic test incident to verify configured sinks")
-	fmt.Fprintln(w, "  rules         List all 23 built-in SIEM-001..502 correlation rules")
-	fmt.Fprintln(w, "  mcp           Run 10-tool stdio JSON-RPC 2.0 MCP server")
-	fmt.Fprintln(w, "  version       Show raksa-siem version and schema metadata")
+	fmt.Fprintln(w, "  analyze        Normalize multi-format logs/reports and correlate SIEM incidents")
+	fmt.Fprintln(w, "  correlate      Correlate upstream Raksa Layer 1-5 Finding JSON/NDJSON reports")
+	fmt.Fprintln(w, "  normalize      Convert multi-format telemetry into canonical Raksa Event JSON")
+	fmt.Fprintln(w, "  watch          Continuously tail log files/dirs and route correlated alerts")
+	fmt.Fprintln(w, "  serve          Run HTTP/TLS ingest/query API, RBAC, and Syslog UDP/TCP receivers")
+	fmt.Fprintln(w, "  verify-rules   Validate .raksa-siem.yml policy, sequence rules, waivers, and sinks")
+	fmt.Fprintln(w, "  verify-sigma   Compile and validate native Sigma YAML detection rules")
+	fmt.Fprintln(w, "  verify-ledger  Verify SHA-256 hash-chain integrity across an audit ledger directory")
+	fmt.Fprintln(w, "  case           List or triage SIEM incident cases in an audit ledger directory")
+	fmt.Fprintln(w, "  test-alert     Dispatch a synthetic test incident to verify configured sinks")
+	fmt.Fprintln(w, "  rules          List all 23 built-in SIEM-001..502 correlation rules")
+	fmt.Fprintln(w, "  mcp            Run 12-tool stdio JSON-RPC 2.0 MCP server")
+	fmt.Fprintln(w, "  version        Show raksa-siem version and schema metadata")
 }
 
 func cmdAnalyze(args []string, stdin io.Reader, stdout, stderr io.Writer, forceRaksa bool) int {
@@ -99,7 +106,7 @@ func cmdAnalyze(args []string, stdin io.Reader, stdout, stderr io.Writer, forceR
 	fs := flag.NewFlagSet(cmdName, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	formatStr := fs.String("format", defaultFmt, "input format: auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef, auditd, cloudtrail, k8s-audit, suricata, win-evtx, leef")
-	outputStr := fs.String("output", string(report.FormatTable), "output format: table, json, sarif, markdown, ndjson")
+	outputStr := fs.String("output", string(report.FormatTable), "output format: table, json, sarif, markdown, ndjson, html, attack-nav")
 	policyPath := fs.String("policy", "", "path to .raksa-siem.yml policy")
 	baselinePath := fs.String("baseline", "", "path to SHA-256 baseline file")
 	writeBaseline := fs.String("write-baseline", "", "write current findings baseline SHA-256 file")
@@ -284,19 +291,27 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 func cmdServe(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	addr := fs.String("addr", "127.0.0.1:8484", "HTTP listen address")
+	addr := fs.String("addr", "127.0.0.1:8484", "HTTP/HTTPS listen address")
 	syslogUDP := fs.String("syslog-udp", "", "optional Syslog UDP listen address (e.g. 127.0.0.1:5514)")
 	syslogTCP := fs.String("syslog-tcp", "", "optional Syslog TCP listen address (e.g. 127.0.0.1:5515)")
 	policyPath := fs.String("policy", "", "policy file path")
 	storePath := fs.String("store", "", "optional NDJSON persistence path")
-	apiKeyEnv := fs.String("api-key-env", "", "optional environment variable holding required API key")
+	ledgerDir := fs.String("ledger-dir", "", "optional SHA-256 hash-chained audit ledger directory")
+	retentionDays := fs.Int("retention-days", 0, "optional ledger segment retention window in days (0 disables pruning)")
+	tlsCert := fs.String("tls-cert", "", "optional TLS server certificate PEM path")
+	tlsKey := fs.String("tls-key", "", "optional TLS server private key PEM path")
+	tlsClientCA := fs.String("tls-client-ca", "", "optional client CA bundle PEM path enabling mTLS")
+	apiKeyEnv := fs.String("api-key-env", "", "optional environment variable holding full admin API key")
+	ingestKeyEnv := fs.String("ingest-key-env", "", "optional environment variable holding ingest-scoped token")
+	readKeyEnv := fs.String("read-key-env", "", "optional environment variable holding read-scoped token")
+	adminKeyEnv := fs.String("admin-key-env", "", "optional environment variable holding admin-scoped token")
 	dryRun := fs.Bool("dry-run", false, "simulate alert routes instead of external network posts")
 	sigmaFlag, intelFlag, assetsFlag := addOverlayFlags(fs)
 
 	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
 		return 2
 	}
-	pol, _, err := policy.DiscoverPolicy(".", *policyPath)
+	pol, polPath, err := policy.DiscoverPolicy(".", *policyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "policy error: %v\n", err)
 		return 2
@@ -306,13 +321,22 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	srv, err := server.New(server.Config{
-		Addr:          *addr,
-		SyslogUDPAddr: *syslogUDP,
-		SyslogTCPAddr: *syslogTCP,
-		Policy:        pol,
-		StorePath:     *storePath,
-		APIKeyEnv:     *apiKeyEnv,
-		DryRunAlerts:  *dryRun,
+		Addr:            *addr,
+		SyslogUDPAddr:   *syslogUDP,
+		SyslogTCPAddr:   *syslogTCP,
+		Policy:          pol,
+		PolicyPath:      polPath,
+		StorePath:       *storePath,
+		LedgerDir:       *ledgerDir,
+		RetentionDays:   *retentionDays,
+		TLSCertFile:     *tlsCert,
+		TLSKeyFile:      *tlsKey,
+		TLSClientCAFile: *tlsClientCA,
+		APIKeyEnv:       *apiKeyEnv,
+		IngestKeyEnv:    *ingestKeyEnv,
+		ReadKeyEnv:      *readKeyEnv,
+		AdminKeyEnv:     *adminKeyEnv,
+		DryRunAlerts:    *dryRun,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "serve init error: %v\n", err)
@@ -326,6 +350,122 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return 0
+}
+
+func cmdVerifyLedger(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("verify-ledger", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dirFlag := fs.String("dir", "", "path to segmented ledger directory")
+	output := fs.String("output", "table", "output format: table or json")
+	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
+		return 2
+	}
+	dir := strings.TrimSpace(*dirFlag)
+	if dir == "" && fs.NArg() > 0 {
+		dir = strings.TrimSpace(fs.Arg(0))
+	}
+	if dir == "" {
+		fmt.Fprintln(stderr, "verify-ledger requires --dir <path> or a positional directory path")
+		return 2
+	}
+	rep, err := ledger.VerifyDir(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "verify-ledger error: %v\n", err)
+		return 2
+	}
+	if strings.EqualFold(strings.TrimSpace(*output), "json") {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+	} else {
+		status := "VALID"
+		if !rep.Valid {
+			status = "INVALID"
+		}
+		fmt.Fprintf(stdout, "Ledger Verification: %s\n", status)
+		fmt.Fprintf(stdout, "Directory:           %s\n", rep.Dir)
+		fmt.Fprintf(stdout, "Segments checked:    %d\n", rep.SegmentsChecked)
+		fmt.Fprintf(stdout, "Entries checked:     %d\n", rep.EntriesChecked)
+		fmt.Fprintf(stdout, "Tip SHA-256:         %s\n", rep.TipHash)
+		if !rep.Valid {
+			fmt.Fprintf(stdout, "Broken segment:      %s\n", rep.BrokenSegment)
+			fmt.Fprintf(stdout, "Broken at seq:       %d\n", rep.BrokenAtSeq)
+			fmt.Fprintf(stdout, "Detail:              %s\n", rep.Error)
+		}
+	}
+	if !rep.Valid {
+		return 1
+	}
+	return 0
+}
+
+func cmdCase(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("case", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dirFlag := fs.String("dir", "", "path to segmented ledger directory")
+	action := fs.String("action", "list", "case action: list or update")
+	statusVal := fs.String("status", "", "status filter (list) or status value: open, ack, resolved, false_positive (update)")
+	findingID := fs.String("finding-id", "", "finding ID to triage")
+	assignee := fs.String("assignee", "", "assignee handle")
+	author := fs.String("author", "", "note author")
+	note := fs.String("note", "", "triage note")
+	output := fs.String("output", "table", "output format: table or json")
+	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
+		return 2
+	}
+	dir := strings.TrimSpace(*dirFlag)
+	if dir == "" && fs.NArg() > 0 {
+		dir = strings.TrimSpace(fs.Arg(0))
+	}
+	if dir == "" {
+		fmt.Fprintln(stderr, "case requires --dir <path>")
+		return 2
+	}
+	ld, err := ledger.Open(dir, 0)
+	if err != nil {
+		fmt.Fprintf(stderr, "case ledger error: %v\n", err)
+		return 2
+	}
+
+	switch strings.ToLower(strings.TrimSpace(*action)) {
+	case "list":
+		cases := ld.ListCases(*statusVal)
+		if cases == nil {
+			cases = []ledger.CaseRecord{}
+		}
+		if strings.EqualFold(strings.TrimSpace(*output), "json") {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"total": len(cases), "cases": cases})
+			return 0
+		}
+		fmt.Fprintf(stdout, "Cases (%d):\n", len(cases))
+		for _, c := range cases {
+			fmt.Fprintf(stdout, "  %s\tstatus=%s\tassignee=%s\tnotes=%d\tupdated=%s\n",
+				c.FindingID, c.Status, c.Assignee, len(c.Notes), c.UpdatedAt)
+		}
+		return 0
+
+	case "update":
+		rec, err := ld.UpdateCase(*findingID, *statusVal, *assignee, *author, *note)
+		if err != nil {
+			fmt.Fprintf(stderr, "case update error: %v\n", err)
+			return 2
+		}
+		if strings.EqualFold(strings.TrimSpace(*output), "json") {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(rec)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Updated %s -> status=%s assignee=%s notes=%d\n",
+			rec.FindingID, rec.Status, rec.Assignee, len(rec.Notes))
+		return 0
+
+	default:
+		fmt.Fprintf(stderr, "unsupported case action %q: expected list or update\n", *action)
+		return 2
+	}
 }
 
 func cmdVerifySigma(args []string, stdout, stderr io.Writer) int {
