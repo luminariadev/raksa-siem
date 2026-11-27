@@ -40,9 +40,9 @@ type Policy struct {
 	Assets              []intel.AssetEntry `yaml:"assets" json:"assets"`
 	Routes              []AlertRoute       `yaml:"routes" json:"routes"`
 
-	baseDir      string             `yaml:"-" json:"-"`
-	SigmaRules   []*sigma.Rule      `yaml:"-" json:"-"`
-	ThreatFeed   *intel.ThreatFeed  `yaml:"-" json:"-"`
+	baseDir      string              `yaml:"-" json:"-"`
+	SigmaRules   []*sigma.Rule       `yaml:"-" json:"-"`
+	ThreatFeed   *intel.ThreatFeed   `yaml:"-" json:"-"`
 	AssetCatalog *intel.AssetCatalog `yaml:"-" json:"-"`
 }
 

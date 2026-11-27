@@ -37,19 +37,19 @@ type LogSource struct {
 
 // Rule is a compiled native Sigma YAML detection rule ready for thread-safe evaluation.
 type Rule struct {
-	ID             string          `json:"id"`
-	Title          string          `json:"title"`
-	Status         string          `json:"status,omitempty"`
-	Description    string          `json:"description,omitempty"`
-	Author         string          `json:"author,omitempty"`
-	Level          schema.Severity `json:"level"`
-	Tags           []string        `json:"tags,omitempty"`
-	MitreTechnique string          `json:"mitre_technique,omitempty"`
-	LogSource      LogSource       `json:"logsource,omitempty"`
-	ConditionRaw   string          `json:"condition"`
-	Timeframe      time.Duration   `json:"timeframe"`
+	ID             string           `json:"id"`
+	Title          string           `json:"title"`
+	Status         string           `json:"status,omitempty"`
+	Description    string           `json:"description,omitempty"`
+	Author         string           `json:"author,omitempty"`
+	Level          schema.Severity  `json:"level"`
+	Tags           []string         `json:"tags,omitempty"`
+	MitreTechnique string           `json:"mitre_technique,omitempty"`
+	LogSource      LogSource        `json:"logsource,omitempty"`
+	ConditionRaw   string           `json:"condition"`
+	Timeframe      time.Duration    `json:"timeframe"`
 	Aggregation    *AggregationSpec `json:"aggregation,omitempty"`
-	SourcePath     string          `json:"source_path,omitempty"`
+	SourcePath     string           `json:"source_path,omitempty"`
 
 	selections map[string]matcher
 	condNode   condExpr
