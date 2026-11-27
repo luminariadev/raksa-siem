@@ -16,22 +16,56 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/luminariadev/raksa-siem/internal/intel"
 	"github.com/luminariadev/raksa-siem/internal/schema"
+	"github.com/luminariadev/raksa-siem/internal/sigma"
 )
 
-// Policy configures thresholds, watchlists, fail-closed waivers, custom rules, and alert routes.
+// Policy configures thresholds, watchlists, fail-closed waivers, custom/Sigma/sequence rules, threat intel, assets, and alert routes.
 type Policy struct {
-	MinSeverity         schema.Severity `yaml:"min_severity" json:"min_severity"`
-	SuppressionWindow   string          `yaml:"suppression_window" json:"suppression_window"`
-	AuthBurstThreshold  int             `yaml:"auth_burst_threshold" json:"auth_burst_threshold"`
-	WebProbeThreshold   int             `yaml:"web_probe_threshold" json:"web_probe_threshold"`
-	AlertStormThreshold int             `yaml:"alert_storm_threshold" json:"alert_storm_threshold"`
-	WatchedIPs          []string        `yaml:"watched_ips" json:"watched_ips"`
-	WatchedHosts        []string        `yaml:"watched_hosts" json:"watched_hosts"`
-	WatchedUsers        []string        `yaml:"watched_users" json:"watched_users"`
-	Suppressions        []Suppression   `yaml:"suppressions" json:"suppressions"`
-	CustomRules         []CustomRule    `yaml:"custom_rules" json:"custom_rules"`
-	Routes              []AlertRoute    `yaml:"routes" json:"routes"`
+	MinSeverity         schema.Severity    `yaml:"min_severity" json:"min_severity"`
+	SuppressionWindow   string             `yaml:"suppression_window" json:"suppression_window"`
+	AuthBurstThreshold  int                `yaml:"auth_burst_threshold" json:"auth_burst_threshold"`
+	WebProbeThreshold   int                `yaml:"web_probe_threshold" json:"web_probe_threshold"`
+	AlertStormThreshold int                `yaml:"alert_storm_threshold" json:"alert_storm_threshold"`
+	WatchedIPs          []string           `yaml:"watched_ips" json:"watched_ips"`
+	WatchedHosts        []string           `yaml:"watched_hosts" json:"watched_hosts"`
+	WatchedUsers        []string           `yaml:"watched_users" json:"watched_users"`
+	Suppressions        []Suppression      `yaml:"suppressions" json:"suppressions"`
+	CustomRules         []CustomRule       `yaml:"custom_rules" json:"custom_rules"`
+	SequenceRules       []SequenceRule     `yaml:"sequence_rules" json:"sequence_rules"`
+	SigmaPaths          []string           `yaml:"sigma_paths" json:"sigma_paths"`
+	ThreatIntelPaths    []string           `yaml:"threat_intel_paths" json:"threat_intel_paths"`
+	AssetPaths          []string           `yaml:"asset_paths" json:"asset_paths"`
+	Assets              []intel.AssetEntry `yaml:"assets" json:"assets"`
+	Routes              []AlertRoute       `yaml:"routes" json:"routes"`
+
+	baseDir      string             `yaml:"-" json:"-"`
+	SigmaRules   []*sigma.Rule      `yaml:"-" json:"-"`
+	ThreatFeed   *intel.ThreatFeed  `yaml:"-" json:"-"`
+	AssetCatalog *intel.AssetCatalog `yaml:"-" json:"-"`
+}
+
+// SequenceStep matches a single stage inside a multi-step ordered SequenceRule.
+type SequenceStep struct {
+	Name          string            `yaml:"name" json:"name"`
+	Match         map[string]string `yaml:"match" json:"match"`
+	compiledRegex *regexp.Regexp
+}
+
+// SequenceRule defines EQL-style ordered multi-step kill-chain correlation inside a time window.
+type SequenceRule struct {
+	ID          string          `yaml:"id" json:"id"`
+	Title       string          `yaml:"title" json:"title"`
+	Description string          `yaml:"description" json:"description"`
+	Severity    schema.Severity `yaml:"severity" json:"severity"`
+	Window      string          `yaml:"window" json:"window"`
+	GroupBy     string          `yaml:"group_by" json:"group_by"`
+	MitreD3FEND string          `yaml:"mitre_d3fend" json:"mitre_d3fend"`
+	Remediation string          `yaml:"remediation" json:"remediation"`
+	Steps       []SequenceStep  `yaml:"steps" json:"steps"`
+
+	windowDur time.Duration
 }
 
 // Suppression represents a time-bounded fail-closed waiver entry.
@@ -112,6 +146,7 @@ func LoadPolicy(path string) (Policy, error) {
 		return Policy{}, fmt.Errorf("read policy %s: %w", path, err)
 	}
 	pol := DefaultPolicy()
+	pol.baseDir = filepath.Dir(path)
 	if err := yaml.Unmarshal(raw, &pol); err != nil {
 		return Policy{}, fmt.Errorf("parse policy %s: %w", path, err)
 	}
@@ -208,6 +243,96 @@ func (p *Policy) ValidateAndCompile() error {
 		}
 	}
 
+	for idx := range p.SequenceRules {
+		sr := &p.SequenceRules[idx]
+		if strings.TrimSpace(sr.ID) == "" || strings.TrimSpace(sr.Title) == "" {
+			return fmt.Errorf("sequence_rules[%d]: id and title are required", idx)
+		}
+		if len(sr.Steps) < 2 {
+			return fmt.Errorf("sequence_rules[%d] (%s): at least 2 ordered steps are required", idx, sr.ID)
+		}
+		if sr.Severity == "" {
+			sr.Severity = schema.SeverityCritical
+		} else {
+			sev, err := schema.ParseSeverity(string(sr.Severity))
+			if err != nil {
+				return fmt.Errorf("sequence_rules[%d] (%s): %w", idx, sr.ID, err)
+			}
+			sr.Severity = sev
+		}
+		if sr.Window == "" {
+			sr.Window = "15m"
+		}
+		dur, err := time.ParseDuration(sr.Window)
+		if err != nil || dur <= 0 {
+			return fmt.Errorf("sequence_rules[%d] (%s): invalid window %q", idx, sr.ID, sr.Window)
+		}
+		sr.windowDur = dur
+		if sr.GroupBy == "" {
+			sr.GroupBy = "src_ip"
+		}
+		if sr.MitreD3FEND == "" {
+			sr.MitreD3FEND = "D3-SCA"
+		}
+		for sIdx := range sr.Steps {
+			st := &sr.Steps[sIdx]
+			if strings.TrimSpace(st.Name) == "" {
+				st.Name = fmt.Sprintf("step_%d", sIdx+1)
+			}
+			if len(st.Match) == 0 {
+				return fmt.Errorf("sequence_rules[%d] (%s).steps[%d]: match map cannot be empty", idx, sr.ID, sIdx)
+			}
+			if rx := strings.TrimSpace(st.Match["message_regex"]); rx != "" {
+				compiled, err := regexp.Compile(rx)
+				if err != nil {
+					return fmt.Errorf("sequence_rules[%d] (%s).steps[%d]: invalid message_regex: %w", idx, sr.ID, sIdx, err)
+				}
+				st.compiledRegex = compiled
+			}
+		}
+	}
+
+	if len(p.SigmaPaths) > 0 {
+		var loaded []*sigma.Rule
+		for _, rawPath := range p.SigmaPaths {
+			resolved := resolvePolicyPath(p.baseDir, rawPath)
+			rules, err := sigma.LoadPath(resolved)
+			if err != nil {
+				return fmt.Errorf("sigma_paths %q: %w", rawPath, err)
+			}
+			loaded = append(loaded, rules...)
+		}
+		p.SigmaRules = loaded
+	}
+
+	if len(p.ThreatIntelPaths) > 0 {
+		feed := intel.NewThreatFeed()
+		for _, rawPath := range p.ThreatIntelPaths {
+			resolved := resolvePolicyPath(p.baseDir, rawPath)
+			if err := feed.LoadFile(resolved); err != nil {
+				return fmt.Errorf("threat_intel_paths %q: %w", rawPath, err)
+			}
+		}
+		p.ThreatFeed = feed
+	}
+
+	if len(p.AssetPaths) > 0 || len(p.Assets) > 0 {
+		combined := append([]intel.AssetEntry(nil), p.Assets...)
+		for _, rawPath := range p.AssetPaths {
+			resolved := resolvePolicyPath(p.baseDir, rawPath)
+			loaded, err := intel.LoadAssetFile(resolved)
+			if err != nil {
+				return fmt.Errorf("asset_paths %q: %w", rawPath, err)
+			}
+			combined = append(combined, loaded...)
+		}
+		cat, err := intel.NewAssetCatalog(combined)
+		if err != nil {
+			return err
+		}
+		p.AssetCatalog = cat
+	}
+
 	for idx := range p.Routes {
 		rt := &p.Routes[idx]
 		kind := strings.ToLower(strings.TrimSpace(rt.Type))
@@ -274,13 +399,38 @@ func (c CustomRule) WindowDuration() time.Duration {
 	return 5 * time.Minute
 }
 
+// WindowDuration returns the validated aggregation window for SequenceRule.
+func (s SequenceRule) WindowDuration() time.Duration {
+	if s.windowDur > 0 {
+		return s.windowDur
+	}
+	if d, err := time.ParseDuration(s.Window); err == nil && d > 0 {
+		return d
+	}
+	return 15 * time.Minute
+}
+
+// MatchesEvent tests all predicates configured on SequenceStep against ev.
+func (s SequenceStep) MatchesEvent(ev schema.Event) bool {
+	return MatchEventPredicates(s.Match, s.compiledRegex, ev)
+}
+
 // MatchesEvent tests all predicates configured on CustomRule against ev.
 func (c CustomRule) MatchesEvent(ev schema.Event) bool {
-	for k, expected := range c.Match {
+	return MatchEventPredicates(c.Match, c.compiledRegex, ev)
+}
+
+// MatchEventPredicates evaluates declarative match criteria shared across CustomRule and SequenceStep.
+func MatchEventPredicates(match map[string]string, compiledRegex *regexp.Regexp, ev schema.Event) bool {
+	for k, expected := range match {
 		expLow := strings.ToLower(strings.TrimSpace(expected))
 		switch strings.ToLower(strings.TrimSpace(k)) {
 		case "layer":
 			if strings.ToLower(ev.Layer) != expLow {
+				return false
+			}
+		case "source_format", "format":
+			if strings.ToLower(ev.SourceFormat) != expLow {
 				return false
 			}
 		case "category":
@@ -341,12 +491,12 @@ func (c CustomRule) MatchesEvent(ev schema.Event) bool {
 				return false
 			}
 		case "message_regex":
-			if c.compiledRegex == nil {
+			if compiledRegex == nil {
 				rx, err := regexp.Compile(expected)
 				if err != nil || !rx.MatchString(ev.Message+" "+ev.Raw) {
 					return false
 				}
-			} else if !c.compiledRegex.MatchString(ev.Message + " " + ev.Raw) {
+			} else if !compiledRegex.MatchString(ev.Message + " " + ev.Raw) {
 				return false
 			}
 		default:
@@ -354,6 +504,17 @@ func (c CustomRule) MatchesEvent(ev schema.Event) bool {
 		}
 	}
 	return true
+}
+
+func resolvePolicyPath(baseDir, rawPath string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(rawPath))
+	if filepath.IsAbs(cleaned) || baseDir == "" || baseDir == "." {
+		return cleaned
+	}
+	if _, err := os.Stat(cleaned); err == nil {
+		return cleaned
+	}
+	return filepath.Join(baseDir, cleaned)
 }
 
 // ApplyPolicy filters findings by min_severity and active non-expired suppressions.

@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luminariadev/raksa-siem/internal/intel"
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/schema"
+	"github.com/luminariadev/raksa-siem/internal/sigma"
 )
 
 const maxTrackedKeys = 10000
@@ -40,7 +42,14 @@ type stampRecord struct {
 	ev  schema.Event
 }
 
-// Engine evaluates single-source, windowed burst, and cross-layer attack kill-chain rules safely across goroutines.
+type seqChain struct {
+	startedAt   time.Time
+	matchedStep int
+	eventIDs    []string
+	stepNames   []string
+}
+
+// Engine evaluates single-source, windowed burst, sequence, Sigma, threat intel, and cross-layer rules safely across goroutines.
 type Engine struct {
 	mu  sync.Mutex
 	pol policy.Policy
@@ -63,6 +72,8 @@ type Engine struct {
 	layersByHost      map[string][]stampRecord
 	hostsByActor      map[string][]stampRecord
 	customWindows     map[string][]time.Time
+	sigmaWindows      map[string][]stampRecord
+	seqChains         map[string][]seqChain
 	cooldownByAlertID map[string]time.Time
 }
 
@@ -104,6 +115,8 @@ func NewEngine(pol policy.Policy) *Engine {
 		layersByHost:      make(map[string][]stampRecord),
 		hostsByActor:      make(map[string][]stampRecord),
 		customWindows:     make(map[string][]time.Time),
+		sigmaWindows:      make(map[string][]stampRecord),
+		seqChains:         make(map[string][]seqChain),
 		cooldownByAlertID: make(map[string]time.Time),
 	}
 }
@@ -464,6 +477,115 @@ func (e *Engine) Ingest(ev schema.Event) []schema.Finding {
 		}
 	}
 
+	// 7. Native Sigma YAML Rules (SIEM-403)
+	for _, sr := range e.pol.SigmaRules {
+		if !sr.MatchesEvent(ev) {
+			continue
+		}
+		gVal := sr.GroupValue(ev)
+		if !sr.HasAggregation() {
+			if e.canEmit("sigma:"+sr.ID, gVal+":"+ev.ID, ts, time.Minute) {
+				out = append(out, makeSigmaFinding(sr, targetForEvent(ev), ts, gVal, 1))
+			}
+			continue
+		}
+		agg := sr.Aggregation
+		key := sr.ID + "|" + gVal
+		dVal := ev.ID
+		if agg.DistinctField != "" {
+			if vals := sigmaDistinctFieldValue(ev, agg.DistinctField); vals != "" {
+				dVal = vals
+			}
+		}
+		e.sigmaWindows[key] = appendPruneRecord(e.sigmaWindows[key], stampRecord{ts: ts, val: dVal, ev: ev}, sr.Timeframe)
+		cnt := len(e.sigmaWindows[key])
+		if agg.DistinctField != "" {
+			cnt = distinctVals(e.sigmaWindows[key])
+		}
+		if evalAggThreshold(agg.Op, cnt, agg.Threshold) && e.canEmit("sigma:"+sr.ID, gVal, ts, sr.Timeframe) {
+			out = append(out, makeSigmaFinding(sr, targetForEvent(ev), ts, gVal, cnt))
+		}
+	}
+
+	// 8. Ordered Multi-Step EQL-Style Sequence Rules (SIEM-206)
+	for _, sq := range e.pol.SequenceRules {
+		if len(sq.Steps) < 2 {
+			continue
+		}
+		gVal := groupValue(ev, sq.GroupBy)
+		win := sq.WindowDuration()
+		key := sq.ID + "|" + gVal
+		chains := pruneSeqChains(e.seqChains[key], ts, win)
+		var nextChains []seqChain
+		completed := false
+		var completedChain seqChain
+
+		for _, ch := range chains {
+			nextIdx := ch.matchedStep + 1
+			if nextIdx < len(sq.Steps) && sq.Steps[nextIdx].MatchesEvent(ev) {
+				updated := seqChain{
+					startedAt:   ch.startedAt,
+					matchedStep: nextIdx,
+					eventIDs:    append(append([]string(nil), ch.eventIDs...), ev.ID),
+					stepNames:   append(append([]string(nil), ch.stepNames...), sq.Steps[nextIdx].Name),
+				}
+				if nextIdx == len(sq.Steps)-1 && !completed {
+					completed = true
+					completedChain = updated
+					continue
+				}
+				nextChains = append(nextChains, updated)
+				continue
+			}
+			nextChains = append(nextChains, ch)
+		}
+		if sq.Steps[0].MatchesEvent(ev) && len(nextChains) < 32 {
+			nextChains = append(nextChains, seqChain{
+				startedAt:   ts,
+				matchedStep: 0,
+				eventIDs:    []string{ev.ID},
+				stepNames:   []string{sq.Steps[0].Name},
+			})
+		}
+		if len(nextChains) == 0 {
+			delete(e.seqChains, key)
+		} else {
+			e.seqChains[key] = nextChains
+		}
+		if completed && e.canEmit("seq:"+sq.ID, gVal, ts, win) {
+			out = append(out, makeSequenceFinding(sq, targetForEvent(ev), ts, gVal, completedChain))
+		}
+	}
+
+	// 9. STIX 2.1 / CIDR Threat Intelligence Feed Matches (SIEM-502)
+	if e.pol.ThreatFeed != nil {
+		for _, m := range e.pol.ThreatFeed.MatchEvent(ev) {
+			if e.canEmit("SIEM-502", m.MatchedOn+":"+m.MatchedVal, ts, 15*time.Minute) {
+				f := makeFinding("SIEM-502", targetForEvent(ev), ts,
+					fmt.Sprintf("Telemetry %s (%q) matched %s threat intel indicator %q (%s).", m.MatchedOn, m.MatchedVal, m.Indicator.Kind, m.Indicator.Value, m.Indicator.Source),
+					map[string]any{
+						"indicator":   m.Indicator.Value,
+						"kind":        m.Indicator.Kind,
+						"source":      m.Indicator.Source,
+						"matched_on":  m.MatchedOn,
+						"matched_val": m.MatchedVal,
+						"host":        ev.Host,
+						"src_ip":      ev.SrcIP,
+					},
+				)
+				if m.Indicator.Severity.Rank() > f.Severity.Rank() {
+					f.Severity = m.Indicator.Severity
+				}
+				out = append(out, f)
+			}
+		}
+	}
+
+	// 10. Asset Criticality Enrichment & Tier-1 Escalation
+	if e.pol.AssetCatalog != nil && len(out) > 0 {
+		out = applyAssetEnrichment(e.pol.AssetCatalog, ev, out)
+	}
+
 	e.pruneMapsIfNeeded(ts)
 	return out
 }
@@ -491,6 +613,12 @@ func (e *Engine) pruneMapsIfNeeded(now time.Time) {
 	}
 	if len(e.hostsByActor) > maxTrackedKeys {
 		e.hostsByActor = make(map[string][]stampRecord)
+	}
+	if len(e.sigmaWindows) > maxTrackedKeys {
+		e.sigmaWindows = make(map[string][]stampRecord)
+	}
+	if len(e.seqChains) > maxTrackedKeys {
+		e.seqChains = make(map[string][]seqChain)
 	}
 	if len(e.cooldownByAlertID) > maxTrackedKeys {
 		cutoff := now.Add(-2 * time.Hour)
@@ -589,15 +717,167 @@ func remediationForRule(ruleID string) string {
 		return "Patch or revoke vulnerable/leaked dependencies identified in CI/CD before redeploying runtime workload."
 	case "SIEM-205":
 		return "Quarantine flagged artifacts via raksa-iocscan and kill suspicious persistence processes on the host."
+	case "SIEM-206":
+		return "Contain the attack chain across affected stages, isolate compromised accounts/hosts, and review chronological timeline."
 	case "SIEM-301", "SIEM-302":
 		return "Escalate critical findings to SOC triage and enable automated alert routing."
 	case "SIEM-303":
 		return "Preserve immutable off-host logs and inspect host integrity with raksa-hostguard FIM."
-	case "SIEM-501":
-		return "Inspect activity associated with the watchlisted IP/host/user and tighten monitoring."
+	case "SIEM-403":
+		return "Inspect matched telemetry against Sigma detection metadata and triage affected host or user."
+	case "SIEM-501", "SIEM-502":
+		return "Block matched threat intel indicator/subnet at perimeter firewall and investigate all host/user activity."
 	default:
 		return "Investigate correlated SIEM incident and remediate affected asset."
 	}
+}
+
+func makeSigmaFinding(sr *sigma.Rule, target string, ts time.Time, groupKey string, count int) schema.Finding {
+	h := sha256.Sum256([]byte("SIEM-403|" + sr.ID + "|" + groupKey + "|" + target))
+	desc := sr.Description
+	if desc == "" {
+		desc = fmt.Sprintf("Sigma rule %s (%s) matched %d telemetry event(s) for group %q.", sr.ID, sr.Title, count, groupKey)
+	}
+	evMap := map[string]any{
+		"sigma_id":      sr.ID,
+		"sigma_title":   sr.Title,
+		"group_key":     groupKey,
+		"matched_count": count,
+	}
+	if sr.MitreTechnique != "" {
+		evMap["mitre_technique"] = sr.MitreTechnique
+	}
+	if len(sr.Tags) > 0 {
+		evMap["tags"] = sr.Tags
+	}
+	return schema.Finding{
+		ID:          "siem-403-" + hex.EncodeToString(h[:])[:10],
+		RuleID:      "SIEM-403",
+		Module:      "custom",
+		Layer:       schema.LayerName,
+		Severity:    sr.Level,
+		Title:       fmt.Sprintf("%s [%s]", sr.Title, sr.ID),
+		Description: desc,
+		Target:      target,
+		Evidence:    evMap,
+		Remediation: remediationForRule("SIEM-403"),
+		MitreD3FEND: "D3-SCA",
+		Timestamp:   ts.UTC(),
+	}
+}
+
+func makeSequenceFinding(sq policy.SequenceRule, target string, ts time.Time, groupKey string, ch seqChain) schema.Finding {
+	h := sha256.Sum256([]byte("SIEM-206|" + sq.ID + "|" + groupKey + "|" + target))
+	desc := sq.Description
+	if desc == "" {
+		desc = fmt.Sprintf("Ordered attack sequence %s (%s) completed %d stages for group %q: %s.", sq.ID, sq.Title, len(ch.stepNames), groupKey, strings.Join(ch.stepNames, " -> "))
+	}
+	rem := sq.Remediation
+	if rem == "" {
+		rem = remediationForRule("SIEM-206")
+	}
+	return schema.Finding{
+		ID:          "siem-206-" + hex.EncodeToString(h[:])[:10],
+		RuleID:      "SIEM-206",
+		Module:      "correlation",
+		Layer:       schema.LayerName,
+		Severity:    sq.Severity,
+		Title:       fmt.Sprintf("%s [%s]", sq.Title, sq.ID),
+		Description: desc,
+		Target:      target,
+		Evidence: map[string]any{
+			"sequence_id":  sq.ID,
+			"group_key":    groupKey,
+			"steps":        ch.stepNames,
+			"event_ids":    ch.eventIDs,
+			"duration_sec": ts.Sub(ch.startedAt).Seconds(),
+		},
+		Remediation: rem,
+		MitreD3FEND: sq.MitreD3FEND,
+		Timestamp:   ts.UTC(),
+	}
+}
+
+func pruneSeqChains(chains []seqChain, now time.Time, win time.Duration) []seqChain {
+	cutoff := now.Add(-win)
+	var kept []seqChain
+	for _, ch := range chains {
+		if !ch.startedAt.Before(cutoff) {
+			kept = append(kept, ch)
+		}
+	}
+	return kept
+}
+
+func evalAggThreshold(op string, actual, threshold int) bool {
+	switch op {
+	case ">=":
+		return actual >= threshold
+	case ">":
+		return actual > threshold
+	case "==":
+		return actual == threshold
+	case "<=":
+		return actual <= threshold
+	case "<":
+		return actual < threshold
+	default:
+		return actual >= threshold
+	}
+}
+
+func sigmaDistinctFieldValue(ev schema.Event, field string) string {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "user", "username":
+		return ev.User
+	case "host", "hostname":
+		return ev.Host
+	case "src_ip", "sourceip":
+		return ev.SrcIP
+	case "dst_ip", "dest_ip":
+		return ev.DstIP
+	default:
+		return ev.ID
+	}
+}
+
+func applyAssetEnrichment(cat *intel.AssetCatalog, ev schema.Event, findings []schema.Finding) []schema.Finding {
+	evAsset, hasEvAsset := cat.LookupEvent(ev)
+	for i := range findings {
+		asset := evAsset
+		ok := hasEvAsset
+		if !ok {
+			host, ip := extractHostIPFromTarget(findings[i].Target)
+			asset, ok = cat.LookupHostOrIP(host, ip)
+		}
+		if !ok {
+			continue
+		}
+		if findings[i].Evidence == nil {
+			findings[i].Evidence = make(map[string]any)
+		}
+		findings[i].Evidence["asset_tier"] = asset.Tier
+		if asset.Owner != "" {
+			findings[i].Evidence["asset_owner"] = asset.Owner
+		}
+		if newSev, escalated := intel.EscalateSeverity(findings[i].Severity, asset.Tier); escalated {
+			findings[i].Evidence["escalated_from"] = string(findings[i].Severity)
+			findings[i].Severity = newSev
+		}
+	}
+	return findings
+}
+
+func extractHostIPFromTarget(target string) (string, string) {
+	if strings.HasPrefix(target, "host://") {
+		rest := strings.TrimPrefix(target, "host://")
+		host, _, _ := strings.Cut(rest, "/")
+		return host, ""
+	}
+	if strings.HasPrefix(target, "ip://") {
+		return "", strings.TrimPrefix(target, "ip://")
+	}
+	return "", ""
 }
 
 func targetForEvent(ev schema.Event) string {

@@ -89,4 +89,48 @@ routes:
 	if len(afterBase) != 0 || baseSup != 1 {
 		t.Fatalf("unexpected baseline filtering: len=%d sup=%d", len(afterBase), baseSup)
 	}
+
+	// Enterprise sequence_rules validation (fail closed if <2 steps, success when valid with sigma/assets/intel paths)
+	badSeq := filepath.Join(dir, "bad-seq.yml")
+	_ = os.WriteFile(badSeq, []byte("sequence_rules:\n  - id: SEQ-1\n    title: One step\n    steps:\n      - name: s1\n        match:\n          category: auth\n"), 0o600)
+	if _, err := LoadPolicy(badSeq); err == nil || !strings.Contains(err.Error(), "2 ordered steps") {
+		t.Fatalf("expected fail-closed error for <2 sequence steps, got: %v", err)
+	}
+
+	sigmaPath := filepath.Join(dir, "rule.yml")
+	_ = os.WriteFile(sigmaPath, []byte("title: Local Test Sigma\nid: S1\ndetection:\n  sel:\n    category: ops\n  condition: sel\n"), 0o600)
+	intelPath := filepath.Join(dir, "ips.txt")
+	_ = os.WriteFile(intelPath, []byte("198.51.100.250/32\n"), 0o600)
+	entPolPath := filepath.Join(dir, "ent.yml")
+	entYAML := `
+sigma_paths:
+  - rule.yml
+threat_intel_paths:
+  - ips.txt
+assets:
+  - host: db-core-01
+    tier: tier1
+    owner: dba
+sequence_rules:
+  - id: SEQ-KILL-1
+    title: Auth failure then account add
+    window: 10m
+    group_by: src_ip
+    steps:
+      - name: fail
+        match:
+          category: auth
+          outcome: failure
+      - name: priv
+        match:
+          category: privilege
+`
+	_ = os.WriteFile(entPolPath, []byte(entYAML), 0o600)
+	entPol, err := LoadPolicy(entPolPath)
+	if err != nil {
+		t.Fatalf("LoadPolicy enterprise failed: %v", err)
+	}
+	if len(entPol.SigmaRules) != 1 || entPol.ThreatFeed == nil || entPol.ThreatFeed.Count() != 1 || entPol.AssetCatalog == nil || len(entPol.SequenceRules) != 1 {
+		t.Fatalf("expected compiled Sigma/ThreatFeed/AssetCatalog/SequenceRules, got %+v", entPol)
+	}
 }

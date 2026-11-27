@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luminariadev/raksa-siem/internal/intel"
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/schema"
+	"github.com/luminariadev/raksa-siem/internal/sigma"
 )
 
 func TestCorrelatorAllTwentyRulesAndTimeline(t *testing.T) {
@@ -153,6 +155,77 @@ func TestCorrelatorAllTwentyRulesAndTimeline(t *testing.T) {
 	cleanFindings, _ := AnalyzeBatch(cleanEvs, policy.DefaultPolicy())
 	if len(cleanFindings) != 0 {
 		t.Fatalf("expected 0 findings on clean events, got %+v", cleanFindings)
+	}
+}
+
+func TestCorrelatorSigmaSequenceThreatIntelAndAssetEscalation(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 11, 0, 0, 0, time.UTC)
+
+	sigmaRules, err := sigma.ParseBytes([]byte(`
+title: Suspicious Exec Chain
+id: SIG-T1
+level: medium
+detection:
+  sel:
+    CommandLine|contains: "curl_drop_probe"
+  condition: sel
+`), "inline-sigma.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feed := intel.NewThreatFeed()
+	if err := feed.AddIndicator(intel.Indicator{Value: "198.51.100.200/29", Kind: "cidr", Severity: schema.SeverityHigh, Source: "unit-test"}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := intel.NewAssetCatalog([]intel.AssetEntry{
+		{Host: "prod-core-01", Tier: "tier1", Owner: "core-infra"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pol := policy.DefaultPolicy()
+	pol.SigmaRules = sigmaRules
+	pol.ThreatFeed = feed
+	pol.AssetCatalog = cat
+	pol.SequenceRules = []policy.SequenceRule{
+		{
+			ID:       "SEQ-CHAIN-01",
+			Title:    "Auth fail then privilege exec then IoC alert",
+			Severity: schema.SeverityCritical,
+			Window:   "10m",
+			GroupBy:  "src_ip",
+			Steps: []policy.SequenceStep{
+				{Name: "auth_fail", Match: map[string]string{"category": "auth", "outcome": "failure"}},
+				{Name: "proc_exec", Match: map[string]string{"category": "process", "action": "exec"}},
+				{Name: "ioc_alert", Match: map[string]string{"layer": "ioc-defense"}},
+			},
+		},
+	}
+
+	events := []schema.Event{
+		{ID: "s1", Timestamp: t0, Layer: "host-hardening", Severity: schema.SeverityMedium, Category: "auth", Action: "login", Outcome: "failure", SrcIP: "198.51.100.202", Host: "prod-core-01", User: "admin"},
+		{ID: "s2", Timestamp: t0.Add(15 * time.Second), Layer: "host-hardening", Severity: schema.SeverityLow, Category: "process", Action: "exec", Outcome: "observed", SrcIP: "198.51.100.202", Host: "prod-core-01", Metadata: map[string]any{"command_line": "sh -c curl_drop_probe"}},
+		{ID: "s3", Timestamp: t0.Add(30 * time.Second), Layer: "ioc-defense", Severity: schema.SeverityHigh, Category: "malware", Action: "finding", Outcome: "alert", RuleID: "IOC-101", SrcIP: "198.51.100.202", Host: "prod-core-01"},
+	}
+
+	findings, _ := AnalyzeBatch(events, pol)
+	byRule := make(map[string]schema.Finding)
+	for _, f := range findings {
+		byRule[f.RuleID] = f
+	}
+	for _, want := range []string{"SIEM-206", "SIEM-403", "SIEM-502"} {
+		if _, ok := byRule[want]; !ok {
+			t.Fatalf("expected %s to fire; got %+v", want, byRule)
+		}
+	}
+	// Sigma rule medium -> tier1 escalation bumps to high!
+	if byRule["SIEM-403"].Severity != schema.SeverityHigh || byRule["SIEM-403"].Evidence["asset_tier"] != "tier1" || byRule["SIEM-403"].Evidence["escalated_from"] != "medium" {
+		t.Fatalf("expected tier1 asset escalation medium->high on SIEM-403, got %+v", byRule["SIEM-403"])
+	}
+	if byRule["SIEM-502"].Severity != schema.SeverityCritical {
+		t.Fatalf("expected tier1 asset escalation high->critical on SIEM-502, got %+v", byRule["SIEM-502"])
 	}
 }
 
