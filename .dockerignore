@@ -1,0 +1,11 @@
+.git
+.github
+bin
+dist
+release-assets
+sdk
+.venv
+__pycache__
+*.exe
+*.sarif
+coverage.out
