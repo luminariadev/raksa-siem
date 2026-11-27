@@ -32,12 +32,12 @@ type suppEntry struct {
 
 // SuppressionTracker deduplicates (rule_id, group_key) alerts inside a configured time window.
 type SuppressionTracker struct {
-	mu          sync.Mutex
-	window      time.Duration
-	entries     map[string]*suppEntry
-	delivered   int
-	suppressed  int
-	maxTracked  int
+	mu         sync.Mutex
+	window     time.Duration
+	entries    map[string]*suppEntry
+	delivered  int
+	suppressed int
+	maxTracked int
 }
 
 // NewSuppressionTracker builds a tracker with the supplied cooldown duration.

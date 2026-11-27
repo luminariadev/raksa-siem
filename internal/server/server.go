@@ -46,14 +46,14 @@ type storeRecord struct {
 // Server exposes authenticated REST endpoints for ingesting events, querying incidents,
 // posture scoring, chronological timelines, health checks, and Prometheus metrics.
 type Server struct {
-	cfg       Config
-	pol       policy.Policy
-	apiKey    string
-	mu        sync.Mutex
-	engine    *correlator.Engine
-	router    *router.Router
-	events    []schema.Event
-	incidents []schema.Finding
+	cfg        Config
+	pol        policy.Policy
+	apiKey     string
+	mu         sync.Mutex
+	engine     *correlator.Engine
+	router     *router.Router
+	events     []schema.Event
+	incidents  []schema.Finding
 	suppressed int
 }
 

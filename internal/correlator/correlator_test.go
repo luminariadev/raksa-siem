@@ -161,16 +161,16 @@ func BenchmarkCorrelateEvents(b *testing.B) {
 	events := make([]schema.Event, 1000)
 	for i := 0; i < 1000; i++ {
 		events[i] = schema.Event{
-			ID:        fmt.Sprintf("ev-%d", i),
-			Timestamp: t0.Add(time.Duration(i) * time.Millisecond),
-			Layer:     "web-defense",
-			Severity:  schema.SeverityInfo,
-			Category:  "web",
-			Action:    "request",
-			Outcome:   "success",
+			ID:         fmt.Sprintf("ev-%d", i),
+			Timestamp:  t0.Add(time.Duration(i) * time.Millisecond),
+			Layer:      "web-defense",
+			Severity:   schema.SeverityInfo,
+			Category:   "web",
+			Action:     "request",
+			Outcome:    "success",
 			HTTPStatus: 200,
-			SrcIP:     fmt.Sprintf("198.51.100.%d", i%50),
-			Host:      fmt.Sprintf("app-%02d", i%10),
+			SrcIP:      fmt.Sprintf("198.51.100.%d", i%50),
+			Host:       fmt.Sprintf("app-%02d", i%10),
 		}
 	}
 	pol := policy.DefaultPolicy()

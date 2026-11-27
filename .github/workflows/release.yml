@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            ext: ".exe"
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run go vet and tests
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/luminariadev/raksa-siem/internal/schema.Version=${VERSION}" \
+            -o "dist/raksa-siem${{ matrix.ext }}" \
+            ./cmd/raksa-siem
+
+      - name: Package release archive
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          PKG_NAME="raksa-siem-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "release/${PKG_NAME}"
+          cp "dist/raksa-siem${{ matrix.ext }}" README.md LICENSE "release/${PKG_NAME}/"
+          mkdir -p artifacts
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd release && zip -r "../artifacts/${PKG_NAME}.zip" "${PKG_NAME}")
+          else
+            tar -czf "artifacts/${PKG_NAME}.tar.gz" -C release "${PKG_NAME}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raksa-siem-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: artifacts/*
+
+  build-python-sdk:
+    name: Build Python SDK Wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify Python SDK and build wheel
+        run: |
+          python -m pip install pytest setuptools wheel
+          python -m pytest -v sdk/python/tests
+          mkdir -p artifacts
+          python -m pip wheel sdk/python --no-build-isolation --no-deps -w artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raksa-siem-python-sdk
+          path: artifacts/*
+
+  release:
+    name: Create GitHub Release
+    needs: [build, build-python-sdk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      - name: Collect release artifacts and SHA256 checksums
+        run: |
+          mkdir -p release-files
+          find downloaded -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.whl' \) -exec cp {} release-files/ \;
+          (cd release-files && sha256sum * > checksums-sha256.txt)
+          ls -lh release-files
+
+      - name: Publish Release with Assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          cd release-files
+          for attempt in 1 2 3 4; do
+            if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+              if gh release upload "$TAG_NAME" * --clobber; then
+                exit 0
+              fi
+            else
+              if gh release create "$TAG_NAME" * --title "raksa-siem $TAG_NAME" --generate-notes; then
+                exit 0
+              fi
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "Failed to publish GitHub Release after retries" >&2
+          exit 1

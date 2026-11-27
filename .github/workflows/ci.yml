@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go-test-and-vet:
+    name: Go Format, Vet, Race Tests & Vulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Verify gofmt formatting
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run Go tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Run Go vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Verify clean and attack-chain fixture gates
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/raksa-siem ./cmd/raksa-siem
+          /tmp/raksa-siem analyze testdata/clean --fail-on high --output json
+          set +e
+          /tmp/raksa-siem analyze testdata/attack_chain --fail-on high --output sarif > /tmp/attack.sarif
+          rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "Expected exit code 1 from attack_chain fixture, got $rc"
+            exit 1
+          fi
+          grep -q '"version": "2.1.0"' /tmp/attack.sarif
+
+  python-sdk:
+    name: Python SDK (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pytest and build tooling
+        run: python -m pip install pytest setuptools wheel
+
+      - name: Run Python SDK test suite
+        run: python -m pytest -v sdk/python/tests
+
+      - name: Build zero-dependency wheel
+        run: python -m pip wheel sdk/python --no-build-isolation --no-deps -w /tmp/wheel
+
+  docker-smoke:
+    name: Distroless Container Build & Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build distroless image
+        run: docker build -t raksa-siem:ci .
+
+      - name: Verify non-root execution inside container
+        run: |
+          docker run --rm raksa-siem:ci version
+          docker run --rm raksa-siem:ci rules --output json > /dev/null

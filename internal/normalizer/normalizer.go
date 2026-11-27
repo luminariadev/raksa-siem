@@ -64,13 +64,13 @@ func ParseFormat(raw string) (string, error) {
 }
 
 var (
-	reNginx = regexp.MustCompile(`^(\S+)\s+\S+\s+(\S+)\s+\[([^\]]+)\]\s+"([A-Z]+)\s+([^\s"]+)[^"]*"\s+(\d{3})\s+\S+(?:\s+"[^"]*"\s+"([^"]*)")?(.*)$`)
-	reRFC5424 = regexp.MustCompile(`^(?:<(\d{1,3})>)?\d+\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+(\S+)\s+(\S+)\s+\S+\s+\S+\s+(?:\[[^\]]*\]|-)\s*(.*)$`)
+	reNginx     = regexp.MustCompile(`^(\S+)\s+\S+\s+(\S+)\s+\[([^\]]+)\]\s+"([A-Z]+)\s+([^\s"]+)[^"]*"\s+(\d{3})\s+\S+(?:\s+"[^"]*"\s+"([^"]*)")?(.*)$`)
+	reRFC5424   = regexp.MustCompile(`^(?:<(\d{1,3})>)?\d+\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+(\S+)\s+(\S+)\s+\S+\s+\S+\s+(?:\[[^\]]*\]|-)\s*(.*)$`)
 	reSyslogBSD = regexp.MustCompile(`^(?:<(\d{1,3})>)?([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^\s:\[]+)(?:\[(\d+)\])?:\s*(.*)$`)
 	reSyslogISO = regexp.MustCompile(`^(?:<(\d{1,3})>)?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(\S+)\s+([^\s:\[]+)(?:\[(\d+)\])?:\s*(.*)$`)
 	reIPv4      = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 
-	reSSHFailed = regexp.MustCompile(`Failed\s+(?:password|publickey|none)\s+for\s+(?:invalid user\s+)?([^\s]+)\s+from\s+(\S+)`)
+	reSSHFailed  = regexp.MustCompile(`Failed\s+(?:password|publickey|none)\s+for\s+(?:invalid user\s+)?([^\s]+)\s+from\s+(\S+)`)
 	reSSHInvalid = regexp.MustCompile(`Invalid user\s+([^\s]*)\s*from\s+(\S+)`)
 	reSSHAccept  = regexp.MustCompile(`Accepted\s+(?:password|publickey|keyboard-interactive[^\s]*)\s+for\s+([^\s]+)\s+from\s+(\S+)`)
 	reSudoUser   = regexp.MustCompile(`^(\S+)\s*:.*?(?:USER=([^\s;]+))?.*?COMMAND=(.+)$`)

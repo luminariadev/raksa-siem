@@ -41,15 +41,15 @@ func TestMCPServeAllEightTools(t *testing.T) {
 			},
 		}}),
 		mustMarshal(map[string]any{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": map[string]any{
-			"name": "siem_check_suppression",
+			"name":      "siem_check_suppression",
 			"arguments": map[string]any{"rule_id": "SIEM-001", "group_key": "ip://198.51.100.50"},
 		}}),
 		mustMarshal(map[string]any{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": map[string]any{
-			"name": "siem_check_suppression",
+			"name":      "siem_check_suppression",
 			"arguments": map[string]any{"rule_id": "SIEM-001", "group_key": "ip://198.51.100.50"},
 		}}),
 		mustMarshal(map[string]any{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": map[string]any{
-			"name": "siem_query_incidents",
+			"name":      "siem_query_incidents",
 			"arguments": map[string]any{"rule_id": "SIEM-001"},
 		}}),
 	)
