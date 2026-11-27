@@ -14,6 +14,7 @@ from .correlator import (
     build_timeline,
     compute_posture,
 )
+from .ledger import GENESIS_HASH, LedgerVerifyReport, verify_ledger_dir
 from .normalizer import (
     SUPPORTED_FORMATS,
     NormalizedEvent,
@@ -24,12 +25,15 @@ from .normalizer import (
     normalize_report,
 )
 
-SDK_VERSION = "0.2.0"
+SDK_VERSION = "0.3.0"
+__version__ = SDK_VERSION
 SCHEMA_VERSION = "1.0"
 
 __all__ = [
     "SDK_VERSION",
+    "__version__",
     "SCHEMA_VERSION",
+    "GENESIS_HASH",
     "SUPPORTED_FORMATS",
     "NormalizedEvent",
     "Finding",
@@ -41,6 +45,7 @@ __all__ = [
     "SequenceStep",
     "SequenceRule",
     "Correlator",
+    "LedgerVerifyReport",
     "SiemClient",
     "SiemClientError",
     "detect_format",
@@ -50,5 +55,6 @@ __all__ = [
     "normalize_report",
     "build_timeline",
     "compute_posture",
+    "verify_ledger_dir",
     "validate_endpoint_url",
 ]
