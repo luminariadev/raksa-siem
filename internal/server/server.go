@@ -278,6 +278,7 @@ func (s *Server) requireScope(requiredScope string, next http.HandlerFunc) http.
 			}
 		}
 		if presented == "" {
+			drainSmallBody(r)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "unauthorized: valid X-API-Key or Authorization Bearer token required",
 			})
@@ -288,6 +289,7 @@ func (s *Server) requireScope(requiredScope string, next http.HandlerFunc) http.
 		isIngest := constantTimeEqual(presented, s.ingestKey)
 		isRead := constantTimeEqual(presented, s.readKey)
 		if !isAdmin && !isIngest && !isRead {
+			drainSmallBody(r)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "unauthorized: unrecognized API token",
 			})
@@ -298,12 +300,19 @@ func (s *Server) requireScope(requiredScope string, next http.HandlerFunc) http.
 			(requiredScope == "ingest" && isIngest) ||
 			(requiredScope == "read" && isRead)
 		if !allowed {
+			drainSmallBody(r)
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": fmt.Sprintf("forbidden: scope %q required", requiredScope),
 			})
 			return
 		}
 		next(w, r)
+	}
+}
+
+func drainSmallBody(r *http.Request) {
+	if r != nil && r.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 	}
 }
 
