@@ -1,8 +1,8 @@
-"""Tests for zero-dependency Python raksa-siem-sdk."""
+"""Tests for zero-dependency Python raksa-siem-sdk v0.2.0."""
 
 from __future__ import annotations
 
-import json
+import gzip
 import os
 import socket
 import subprocess
@@ -12,12 +12,17 @@ from pathlib import Path
 import pytest
 
 from raksa_siem_sdk import (
+    AssetCatalog,
+    AssetEntry,
     Correlator,
+    SequenceRule,
+    SequenceStep,
     SiemClient,
     SiemClientError,
+    ThreatFeed,
     compute_posture,
     detect_format,
-    normalize_line,
+    normalize_file,
     normalize_lines,
     validate_endpoint_url,
 )
@@ -31,7 +36,7 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def test_normalizer_all_seven_formats_and_correlator() -> None:
+def test_normalizer_all_thirteen_formats_and_gzip(tmp_path: Path) -> None:
     samples = [
         'Nov 27 10:00:01 app-01 sshd[10]: Failed password for admin from 198.51.100.66 port 5000 ssh2',
         '198.51.100.66 - - [27/Nov/2026:10:00:10 +0000] "GET /.env HTTP/1.1" 404 123 "-" "probe/1.0"',
@@ -39,29 +44,57 @@ def test_normalizer_all_seven_formats_and_correlator() -> None:
         '{"timestamp":"2026-11-27T10:00:20Z","layer":"telemetry","severity":"medium","host":"app-01","message":"timeout"}',
         'CEF:0|Vendor|Guard|1.0|NET-9|Blocked scan|8|src=198.51.100.66 dhost=app-01',
         '{"tool":"raksa-iocscan","layer":"ioc-defense","findings":[{"id":"i1","rule_id":"IOC-001","severity":"critical","description":"ioc hit","evidence":{"host":"app-01","src_ip":"198.51.100.66"}}]}',
+        'type=EXECVE msg=audit(1795773615.100:501): node=prod-core-01 acct="ops" exe="/usr/bin/curl" proctitle="curl_stage_probe" addr=198.51.100.66',
+        '{"eventTime":"2026-11-27T10:00:25Z","eventSource":"cloudtrail.amazonaws.com","eventName":"StopLogging","sourceIPAddress":"198.51.100.66","userIdentity":{"userName":"ci"}}',
+        '{"kind":"Event","verb":"create","requestURI":"/api/v1/namespaces/prod/pods/app/exec","user":{"username":"dev"},"sourceIPs":["198.51.100.66"],"objectRef":{"resource":"pods","subresource":"exec"},"responseStatus":{"code":200}}',
+        '{"timestamp":"2026-11-27T10:00:30Z","event_type":"alert","src_ip":"198.51.100.66","dest_ip":"203.0.113.1","dest_port":443,"alert":{"signature_id":1001,"signature":"ET Alert","severity":1}}',
+        '{"EventID":4625,"TimeCreated":"2026-11-27T10:00:35Z","Computer":"prod-core-01","TargetUserName":"admin","IpAddress":"198.51.100.66"}',
+        'LEEF:2.0|IBM|Firewall|1.0|DENY|^|src=198.51.100.66^devName=fw-01^sev=8^msg=Blocked',
     ]
     detected = [detect_format(s) for s in samples]
-    assert detected == ["auth", "nginx", "syslog", "jsonl", "cef", "raksa"]
+    assert detected == [
+        "auth", "nginx", "syslog", "jsonl", "cef", "raksa",
+        "auditd", "cloudtrail", "k8s-audit", "suricata", "win-evtx", "leef",
+    ]
 
-    events = normalize_lines(
-        [
-            'Nov 27 10:00:01 app-01 sshd[10]: Failed password for admin from 198.51.100.66 port 5001 ssh2',
-            'Nov 27 10:00:02 app-01 sshd[11]: Failed password for root from 198.51.100.66 port 5002 ssh2',
-            'Nov 27 10:00:03 app-01 sshd[12]: Failed password for ops from 198.51.100.66 port 5003 ssh2',
-            'Nov 27 10:00:04 app-01 sshd[13]: Failed password for deploy from 198.51.100.66 port 5004 ssh2',
-            'Nov 27 10:00:05 app-01 sshd[14]: Failed password for dev from 198.51.100.66 port 5005 ssh2',
-            'Nov 27 10:00:08 app-01 sshd[15]: Accepted password for ops from 198.51.100.66 port 5006 ssh2',
-            '{"tool":"raksa-iocscan","layer":"ioc-defense","findings":[{"id":"i1","rule_id":"IOC-001","severity":"critical","description":"ioc","timestamp":"2026-11-27T10:00:30Z","evidence":{"host":"app-01","src_ip":"198.51.100.66"}}]}',
+    gz_path = tmp_path / "enterprise.log.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as gz:
+        gz.write("\n".join(samples[:6]) + "\n")
+    gz_events = normalize_file(gz_path)
+    assert len(gz_events) == 6
+
+
+def test_correlator_sequence_threat_intel_and_asset_escalation() -> None:
+    feed = ThreatFeed()
+    feed.load_file(REPO_ROOT / "testdata" / "enterprise" / "stix_feed.json")
+    feed.load_file(REPO_ROOT / "testdata" / "enterprise" / "cidr_blocklist.txt")
+    assert feed.count == 3
+
+    cat = AssetCatalog([AssetEntry(host="prod-core-01", tier="tier1", owner="secops")])
+    seq = SequenceRule(
+        id="PY-SEQ-1",
+        title="WinEVTX auth fail -> Auditd exec -> Suricata alert",
+        steps=[
+            SequenceStep("auth_fail", {"category": "auth", "outcome": "failure"}),
+            SequenceStep("exec", {"source_format": "auditd", "action": "exec"}),
+            SequenceStep("suricata", {"source_format": "suricata", "category": "network"}),
         ],
-        default_year=2026,
     )
-    corr = Correlator(watched_ips=["198.51.100.66"])
+
+    events = normalize_lines([
+        '{"EventID":4625,"TimeCreated":"2026-11-27T10:00:01Z","Computer":"prod-core-01","TargetUserName":"admin","IpAddress":"198.51.100.88"}',
+        'type=EXECVE msg=audit(1795773615.100:501): node=prod-core-01 acct="ops" exe="/usr/bin/curl" proctitle="curl_stage_probe" addr=198.51.100.88',
+        '{"timestamp":"2026-11-27T10:00:30Z","event_type":"alert","src_ip":"198.51.100.88","dest_ip":"203.0.113.10","dest_port":443,"host":"prod-core-01","alert":{"signature_id":2029002,"signature":"ET Alert","severity":2},"dns":{"rrname":"c2-drop.example.invalid"}}',
+    ])
+
+    corr = Correlator(threat_feed=feed, asset_catalog=cat, sequence_rules=[seq])
     findings, tl = corr.analyze_batch(events)
     rule_ids = {f.rule_id for f in findings}
-    assert {"SIEM-001", "SIEM-002", "SIEM-201", "SIEM-205", "SIEM-501"}.issubset(rule_ids)
-    assert tl.total_events == len(events)
+    assert {"SIEM-201", "SIEM-206", "SIEM-502"}.issubset(rule_ids)
+    assert tl.total_events == 3
+    siem502 = next(f for f in findings if f.rule_id == "SIEM-502")
+    assert siem502.evidence.get("asset_tier") == "tier1"
     assert compute_posture([]).score == 100
-    assert compute_posture(findings).score < 100
 
 
 def test_client_url_guard_rejects_remote_plaintext_http() -> None:

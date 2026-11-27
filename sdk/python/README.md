@@ -1,12 +1,12 @@
 # raksa-siem-sdk
 
-Zero-dependency Python 3.11+ SDK (`raksa-siem-sdk v0.1.0`) for **raksa-siem** (Layer 6 of the Raksa Security Suite).
+Zero-dependency Python 3.11+ SDK (`raksa-siem-sdk v0.2.0`) for **raksa-siem** (Layer 6 of the Raksa Security Suite).
 
 ## Features
 
 - **100% Standard Library**: `dependencies = []` in `pyproject.toml`.
-- **7-Format + Auto Log Normalizer**: `normalize_line`, `normalize_lines`, `normalize_report`, and `detect_format` covering `raksa`, `raksa-ndjson`, `auth`, `syslog`, `nginx`, `jsonl`, and `cef`.
-- **Stateful Correlator & Timeline Builder**: In-process `Correlator`, `build_timeline`, and `compute_posture` (`0-100`, `A+`..`F`).
+- **13-Format + Auto + Gzip Log Normalizer**: `normalize_line`, `normalize_lines`, `normalize_file` (with bounded 64 MiB gzip decompression), `normalize_report`, and `detect_format` covering `raksa`, `raksa-ndjson`, `auth`, `syslog`, `nginx`, `jsonl`, `cef`, `auditd`, `cloudtrail`, `k8s-audit`, `suricata`, `win-evtx`, and `leef`.
+- **Stateful Correlator, Sequence Rules, Threat Intel & Asset Criticality**: In-process `Correlator`, `SequenceRule` (`SIEM-206`), `ThreatFeed` (STIX 2.1 + CIDR via stdlib `ipaddress`), `AssetCatalog` tier-1 severity escalation, `build_timeline`, and `compute_posture` (`0-100`, `A+`..`F`).
 - **Fail-Closed HTTP Client**: `SiemClient` over stdlib `urllib.request` with `validate_endpoint_url` (requires HTTPS remotely or `localhost` / `127.0.0.1`) and optional `X-API-Key` header support.
 
 ## Installation

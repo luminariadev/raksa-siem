@@ -39,7 +39,7 @@ class SiemClient:
         self.timeout = timeout
 
     def _request_json(self, method: str, path: str, payload: Any = None) -> Any:
-        headers = {"Accept": "application/json", "User-Agent": "raksa-siem-sdk/0.1.0"}
+        headers = {"Accept": "application/json", "User-Agent": "raksa-siem-sdk/0.2.0"}
         if self._api_key:
             headers["X-API-Key"] = self._api_key
         data: bytes | None = None

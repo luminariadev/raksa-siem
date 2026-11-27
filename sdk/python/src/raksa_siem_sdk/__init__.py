@@ -1,17 +1,30 @@
 """Zero-dependency Python SDK for raksa-siem."""
 
 from .client import SiemClient, SiemClientError, validate_endpoint_url
-from .correlator import Correlator, Finding, PostureScore, Timeline, build_timeline, compute_posture
+from .correlator import (
+    AssetCatalog,
+    AssetEntry,
+    Correlator,
+    Finding,
+    PostureScore,
+    SequenceRule,
+    SequenceStep,
+    ThreatFeed,
+    Timeline,
+    build_timeline,
+    compute_posture,
+)
 from .normalizer import (
     SUPPORTED_FORMATS,
     NormalizedEvent,
     detect_format,
+    normalize_file,
     normalize_line,
     normalize_lines,
     normalize_report,
 )
 
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "0.2.0"
 SCHEMA_VERSION = "1.0"
 
 __all__ = [
@@ -22,10 +35,16 @@ __all__ = [
     "Finding",
     "PostureScore",
     "Timeline",
+    "ThreatFeed",
+    "AssetEntry",
+    "AssetCatalog",
+    "SequenceStep",
+    "SequenceRule",
     "Correlator",
     "SiemClient",
     "SiemClientError",
     "detect_format",
+    "normalize_file",
     "normalize_line",
     "normalize_lines",
     "normalize_report",
