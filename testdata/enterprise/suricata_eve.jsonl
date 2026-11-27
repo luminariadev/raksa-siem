@@ -1,0 +1,1 @@
+{"timestamp":"2026-11-27T10:00:30Z","event_type":"alert","src_ip":"198.51.100.88","dest_ip":"203.0.113.10","dest_port":443,"proto":"TCP","host":"prod-core-01","alert":{"signature_id":2029002,"signature":"ET POLICY Outbound Probe","severity":1},"dns":{"rrname":"c2-drop.example.invalid"}}

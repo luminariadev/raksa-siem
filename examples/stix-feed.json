@@ -1,0 +1,18 @@
+{
+  "type": "bundle",
+  "id": "bundle--33333333-3333-3333-3333-333333333333",
+  "objects": [
+    {
+      "type": "indicator",
+      "name": "Example Blocked Scanner IP",
+      "confidence": 85,
+      "pattern": "[ipv4-addr:value = '198.51.100.250']"
+    },
+    {
+      "type": "indicator",
+      "name": "Example Suspicious C2 Domain",
+      "confidence": 90,
+      "pattern": "[domain-name:value = 'bad-c2.example.invalid']"
+    }
+  ]
+}

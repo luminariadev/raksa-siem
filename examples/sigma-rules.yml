@@ -1,0 +1,29 @@
+---
+title: Kubernetes Privileged Pod Exec
+id: SIGMA-EX-001
+level: high
+tags:
+  - attack.execution
+  - attack.t1609
+logsource:
+  product: kubernetes
+detection:
+  sel:
+    resource: pods/exec
+  condition: sel
+---
+title: AWS IAM Access Key Creation
+id: SIGMA-EX-002
+level: high
+tags:
+  - attack.persistence
+  - attack.t1098
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  sel:
+    eventName:
+      - CreateAccessKey
+      - AttachUserPolicy
+  condition: sel

@@ -2,12 +2,17 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/schema"
@@ -126,5 +131,93 @@ func TestServerFailClosedAuthAndIngestLifecycle(t *testing.T) {
 	var rep schema.Report
 	if err := json.NewDecoder(posResp.Body).Decode(&rep); err != nil || len(rep.Findings) == 0 {
 		t.Fatalf("expected persisted findings on reload, len=%d err=%v", len(rep.Findings), err)
+	}
+}
+
+func TestServerSyslogUDPTCPAndMetrics(t *testing.T) {
+	pol := policy.DefaultPolicy()
+	pol.AuthBurstThreshold = 3
+
+	addrCh := make(chan string, 2)
+	var udpAddr, tcpAddr string
+
+	srv, err := New(Config{
+		Policy:        pol,
+		SyslogUDPAddr: "127.0.0.1:0",
+		SyslogTCPAddr: "127.0.0.1:0",
+		OnSyslogListen: func(proto, addr string) {
+			addrCh <- proto + "|" + addr
+		},
+		DryRunAlerts: true,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopSyslog, err := srv.StartSyslog(ctx)
+	if err != nil {
+		t.Fatalf("StartSyslog failed: %v", err)
+	}
+	defer stopSyslog()
+
+	for i := 0; i < 2; i++ {
+		val := <-addrCh
+		proto, a, _ := strings.Cut(val, "|")
+		if proto == "udp" {
+			udpAddr = a
+		} else {
+			tcpAddr = a
+		}
+	}
+
+	// Send 2 syslog lines via UDP and 2 via TCP for 198.51.100.88 (threshold=3 triggers SIEM-001)
+	uConn, err := net.Dial("udp", udpAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uConn.Close()
+	for i := 1; i <= 2; i++ {
+		_, _ = fmt.Fprintf(uConn, "<38>Nov 27 10:10:0%d edge-01 sshd[10%d]: Failed password for root from 198.51.100.88 port 500%d ssh2\n", i, i, i)
+	}
+
+	tConn, err := net.Dial("tcp", tcpAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tConn.Close()
+	for i := 3; i <= 4; i++ {
+		_, _ = fmt.Fprintf(tConn, "<38>Nov 27 10:10:0%d edge-01 sshd[10%d]: Failed password for root from 198.51.100.88 port 500%d ssh2\n", i, i, i)
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, gErr := http.Get(ts.URL + "/api/v1/incidents?rule_id=SIEM-001")
+		if gErr == nil {
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if strings.Contains(string(raw), "198.51.100.88") {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for UDP+TCP syslog SIEM-001 correlation")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	mResp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mBody, _ := io.ReadAll(mResp.Body)
+	_ = mResp.Body.Close()
+	if !strings.Contains(string(mBody), `raksa_siem_syslog_received_total{proto="udp"} 2`) ||
+		!strings.Contains(string(mBody), `raksa_siem_syslog_received_total{proto="tcp"} 2`) {
+		t.Fatalf("unexpected syslog metrics output:\n%s", string(mBody))
 	}
 }

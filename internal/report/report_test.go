@@ -65,7 +65,7 @@ func TestSanitizeAndMultiFormatReport(t *testing.T) {
 	if err := json.Unmarshal([]byte(sarifOut), &sarifObj); err != nil {
 		t.Fatalf("unmarshal sarif: %v", err)
 	}
-	if sarifObj.Version != "2.1.0" || len(sarifObj.Runs[0].Tool.Driver.Rules) != 20 || len(sarifObj.Runs[0].Results) != 1 {
+	if sarifObj.Version != "2.1.0" || len(sarifObj.Runs[0].Tool.Driver.Rules) != 23 || len(sarifObj.Runs[0].Results) != 1 {
 		t.Fatalf("unexpected sarif structure: %+v", sarifObj)
 	}
 

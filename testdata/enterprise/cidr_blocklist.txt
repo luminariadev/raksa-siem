@@ -1,0 +1,2 @@
+# RFC 5737 synthetic probe CIDR blocklist
+203.0.113.192/26

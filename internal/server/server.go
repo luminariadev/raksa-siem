@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/luminariadev/raksa-siem/internal/correlator"
@@ -28,13 +29,16 @@ const maxIngestBodyBytes = 2 << 20 // 2 MiB
 
 // Config configures the HTTP SIEM ingestion and incident query server.
 type Config struct {
-	Addr         string
-	Policy       policy.Policy
-	StorePath    string
-	APIKeyEnv    string
-	MaxEvents    int
-	MaxIncidents int
-	DryRunAlerts bool
+	Addr           string
+	SyslogUDPAddr  string
+	SyslogTCPAddr  string
+	OnSyslogListen func(proto, addr string)
+	Policy         policy.Policy
+	StorePath      string
+	APIKeyEnv      string
+	MaxEvents      int
+	MaxIncidents   int
+	DryRunAlerts   bool
 }
 
 type storeRecord struct {
@@ -55,6 +59,8 @@ type Server struct {
 	events     []schema.Event
 	incidents  []schema.Finding
 	suppressed int
+	syslogUDP  atomic.Int64
+	syslogTCP  atomic.Int64
 }
 
 // New initializes a Server, failing closed if APIKeyEnv is named but unset.
@@ -107,8 +113,14 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// ListenAndServe runs the HTTP server with bounded timeouts until ctx is canceled.
+// ListenAndServe runs the HTTP server and optional Syslog UDP/TCP receivers until ctx is canceled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	stopSyslog, err := s.StartSyslog(ctx)
+	if err != nil {
+		return err
+	}
+	defer stopSyslog()
+
 	httpSrv := &http.Server{
 		Addr:              s.cfg.Addr,
 		Handler:           s.Handler(),
@@ -212,7 +224,53 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "raksa_siem_incidents_by_severity{severity=\"medium\"} %d\n", rep.Summary.Medium)
 	fmt.Fprintf(&b, "raksa_siem_incidents_by_severity{severity=\"low\"} %d\n", rep.Summary.Low)
 	fmt.Fprintf(&b, "raksa_siem_incidents_by_severity{severity=\"info\"} %d\n", rep.Summary.Info)
+	fmt.Fprintf(&b, "# HELP raksa_siem_syslog_received_total Total syslog messages ingested over UDP or TCP.\n")
+	fmt.Fprintf(&b, "# TYPE raksa_siem_syslog_received_total counter\n")
+	fmt.Fprintf(&b, "raksa_siem_syslog_received_total{proto=\"udp\"} %d\n", s.syslogUDP.Load())
+	fmt.Fprintf(&b, "raksa_siem_syslog_received_total{proto=\"tcp\"} %d\n", s.syslogTCP.Load())
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// IngestEvents runs normalized events through the correlator, policy, alert router, and persistence store.
+func (s *Server) IngestEvents(ctx context.Context, events []schema.Event) ([]schema.Finding, int, *schema.PostureScore) {
+	var emitted []schema.Finding
+	var suppressed int
+
+	s.mu.Lock()
+	for _, ev := range events {
+		s.appendEventLocked(ev)
+		emitted = append(emitted, s.engine.Ingest(ev)...)
+	}
+	filtered, polSup := policy.ApplyPolicy(emitted, s.pol)
+	suppressed += polSup
+	for _, f := range filtered {
+		s.appendIncidentLocked(f)
+	}
+	s.suppressed += suppressed
+
+	allIncidents := make([]schema.Finding, len(s.incidents))
+	copy(allIncidents, s.incidents)
+	s.mu.Unlock()
+
+	if len(filtered) > 0 {
+		results, _ := s.router.Deliver(ctx, filtered)
+		for _, res := range results {
+			if res.SuppressedCount > 0 {
+				s.mu.Lock()
+				s.suppressed += res.SuppressedCount
+				s.mu.Unlock()
+				suppressed += res.SuppressedCount
+				break
+			}
+		}
+	}
+
+	if strings.TrimSpace(s.cfg.StorePath) != "" && (len(events) > 0 || len(filtered) > 0) {
+		_ = s.appendStore(s.cfg.StorePath, events, filtered)
+	}
+
+	rep := schema.NewReport(allIncidents)
+	return filtered, suppressed, rep.Posture
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
@@ -247,49 +305,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var emitted []schema.Finding
-	var suppressed int
-
-	s.mu.Lock()
-	for _, ev := range events {
-		s.appendEventLocked(ev)
-		emitted = append(emitted, s.engine.Ingest(ev)...)
-	}
-	filtered, polSup := policy.ApplyPolicy(emitted, s.pol)
-	suppressed += polSup
-	for _, f := range filtered {
-		s.appendIncidentLocked(f)
-	}
-	s.suppressed += suppressed
-
-	allIncidents := make([]schema.Finding, len(s.incidents))
-	copy(allIncidents, s.incidents)
-	s.mu.Unlock()
-
-	if len(filtered) > 0 {
-		results, _ := s.router.Deliver(r.Context(), filtered)
-		for _, res := range results {
-			if res.SuppressedCount > 0 {
-				s.mu.Lock()
-				s.suppressed += res.SuppressedCount
-				s.mu.Unlock()
-				suppressed += res.SuppressedCount
-				break
-			}
-		}
-	}
-
-	if strings.TrimSpace(s.cfg.StorePath) != "" && (len(events) > 0 || len(filtered) > 0) {
-		_ = s.appendStore(s.cfg.StorePath, events, filtered)
-	}
-
-	rep := schema.NewReport(allIncidents)
+	filtered, suppressed, posture := s.IngestEvents(r.Context(), events)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ingested":   len(events),
 		"emitted":    len(filtered),
 		"suppressed": suppressed,
 		"findings":   filtered,
-		"posture":    rep.Posture,
+		"posture":    posture,
 	})
 }
 

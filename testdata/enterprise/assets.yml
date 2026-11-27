@@ -1,0 +1,10 @@
+assets:
+  - host: prod-core-01
+    tier: tier1
+    owner: platform-security
+    tags:
+      - production
+      - database-core
+  - cidr: 203.0.113.0/24
+    tier: tier2
+    owner: perimeter-net

@@ -20,6 +20,7 @@ import (
 	"github.com/luminariadev/raksa-siem/internal/router"
 	"github.com/luminariadev/raksa-siem/internal/schema"
 	"github.com/luminariadev/raksa-siem/internal/server"
+	"github.com/luminariadev/raksa-siem/internal/sigma"
 	"github.com/luminariadev/raksa-siem/internal/tailer"
 )
 
@@ -49,6 +50,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdServe(rest, stdout, stderr)
 	case "verify-rules":
 		return cmdVerifyRules(rest, stdout, stderr)
+	case "verify-sigma":
+		return cmdVerifySigma(rest, stdout, stderr)
 	case "test-alert":
 		return cmdTestAlert(rest, stdout, stderr)
 	case "rules":
@@ -76,11 +79,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  correlate     Correlate upstream Raksa Layer 1-5 Finding JSON/NDJSON reports")
 	fmt.Fprintln(w, "  normalize     Convert multi-format telemetry into canonical Raksa Event JSON")
 	fmt.Fprintln(w, "  watch         Continuously tail log files/dirs and route correlated alerts")
-	fmt.Fprintln(w, "  serve         Run authenticated HTTP SIEM ingest & query API server")
-	fmt.Fprintln(w, "  verify-rules  Validate .raksa-siem.yml policy, regex rules, waivers, and sinks")
+	fmt.Fprintln(w, "  serve         Run HTTP ingest/query API and optional Syslog UDP/TCP receivers")
+	fmt.Fprintln(w, "  verify-rules  Validate .raksa-siem.yml policy, sequence rules, waivers, and sinks")
+	fmt.Fprintln(w, "  verify-sigma  Compile and validate native Sigma YAML detection rules")
 	fmt.Fprintln(w, "  test-alert    Dispatch a synthetic test incident to verify configured sinks")
-	fmt.Fprintln(w, "  rules         List all built-in SIEM-001..501 correlation rules")
-	fmt.Fprintln(w, "  mcp           Run 8-tool stdio JSON-RPC 2.0 MCP server")
+	fmt.Fprintln(w, "  rules         List all 23 built-in SIEM-001..502 correlation rules")
+	fmt.Fprintln(w, "  mcp           Run 10-tool stdio JSON-RPC 2.0 MCP server")
 	fmt.Fprintln(w, "  version       Show raksa-siem version and schema metadata")
 }
 
@@ -94,12 +98,13 @@ func cmdAnalyze(args []string, stdin io.Reader, stdout, stderr io.Writer, forceR
 
 	fs := flag.NewFlagSet(cmdName, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	formatStr := fs.String("format", defaultFmt, "input format: auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef")
+	formatStr := fs.String("format", defaultFmt, "input format: auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef, auditd, cloudtrail, k8s-audit, suricata, win-evtx, leef")
 	outputStr := fs.String("output", string(report.FormatTable), "output format: table, json, sarif, markdown, ndjson")
 	policyPath := fs.String("policy", "", "path to .raksa-siem.yml policy")
 	baselinePath := fs.String("baseline", "", "path to SHA-256 baseline file")
 	writeBaseline := fs.String("write-baseline", "", "write current findings baseline SHA-256 file")
 	failOnStr := fs.String("fail-on", string(schema.SeverityHigh), "exit 1 threshold: info, low, medium, high, critical")
+	sigmaFlag, intelFlag, assetsFlag := addOverlayFlags(fs)
 
 	reordered := reorderFlagsFirst(fs, args)
 	if err := fs.Parse(reordered); err != nil {
@@ -130,6 +135,10 @@ func cmdAnalyze(args []string, stdin io.Reader, stdout, stderr io.Writer, forceR
 	pol, _, err := policy.DiscoverPolicy(firstTarget, *policyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "policy error: %v\n", err)
+		return 2
+	}
+	if err := applyOverlays(&pol, *sigmaFlag, *intelFlag, *assetsFlag); err != nil {
+		fmt.Fprintf(stderr, "policy overlay error: %v\n", err)
 		return 2
 	}
 
@@ -221,6 +230,7 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	metricsAddr := fs.String("metrics-addr", "", "optional Prometheus /metrics bind addr")
 	dryRun := fs.Bool("dry-run", false, "simulate alert route delivery without external calls")
 	outputStr := fs.String("output", string(report.FormatNDJSON), "output format: ndjson, json, table")
+	sigmaFlag, intelFlag, assetsFlag := addOverlayFlags(fs)
 
 	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
 		return 2
@@ -233,6 +243,10 @@ func cmdWatch(args []string, stdout, stderr io.Writer) int {
 	pol, _, err := policy.DiscoverPolicy(paths[0], *policyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "policy error: %v\n", err)
+		return 2
+	}
+	if err := applyOverlays(&pol, *sigmaFlag, *intelFlag, *assetsFlag); err != nil {
+		fmt.Fprintf(stderr, "policy overlay error: %v\n", err)
 		return 2
 	}
 	outFmt, err := report.ParseFormat(*outputStr)
@@ -271,10 +285,13 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", "127.0.0.1:8484", "HTTP listen address")
+	syslogUDP := fs.String("syslog-udp", "", "optional Syslog UDP listen address (e.g. 127.0.0.1:5514)")
+	syslogTCP := fs.String("syslog-tcp", "", "optional Syslog TCP listen address (e.g. 127.0.0.1:5515)")
 	policyPath := fs.String("policy", "", "policy file path")
 	storePath := fs.String("store", "", "optional NDJSON persistence path")
 	apiKeyEnv := fs.String("api-key-env", "", "optional environment variable holding required API key")
 	dryRun := fs.Bool("dry-run", false, "simulate alert routes instead of external network posts")
+	sigmaFlag, intelFlag, assetsFlag := addOverlayFlags(fs)
 
 	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
 		return 2
@@ -284,12 +301,18 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "policy error: %v\n", err)
 		return 2
 	}
+	if err := applyOverlays(&pol, *sigmaFlag, *intelFlag, *assetsFlag); err != nil {
+		fmt.Fprintf(stderr, "policy overlay error: %v\n", err)
+		return 2
+	}
 	srv, err := server.New(server.Config{
-		Addr:         *addr,
-		Policy:       pol,
-		StorePath:    *storePath,
-		APIKeyEnv:    *apiKeyEnv,
-		DryRunAlerts: *dryRun,
+		Addr:          *addr,
+		SyslogUDPAddr: *syslogUDP,
+		SyslogTCPAddr: *syslogTCP,
+		Policy:        pol,
+		StorePath:     *storePath,
+		APIKeyEnv:     *apiKeyEnv,
+		DryRunAlerts:  *dryRun,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "serve init error: %v\n", err)
@@ -303,6 +326,55 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return 0
+}
+
+func cmdVerifySigma(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("verify-sigma", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(reorderFlagsFirst(fs, args)); err != nil {
+		return 2
+	}
+	targets := fs.Args()
+	if len(targets) == 0 {
+		fmt.Fprintln(stderr, "verify-sigma requires at least one Sigma YAML file or directory path")
+		return 2
+	}
+	var all []*sigma.Rule
+	for _, p := range targets {
+		rules, err := sigma.LoadPath(p)
+		if err != nil {
+			fmt.Fprintf(stderr, "invalid sigma %q: %v\n", p, err)
+			return 2
+		}
+		all = append(all, rules...)
+	}
+	raw, _ := json.MarshalIndent(map[string]any{
+		"verified": len(all),
+		"rules":    all,
+	}, "", "  ")
+	_, _ = stdout.Write(append(raw, '\n'))
+	return 0
+}
+
+func addOverlayFlags(fs *flag.FlagSet) (*string, *string, *string) {
+	sigmaFlag := fs.String("sigma", "", "comma-separated Sigma YAML rule files or directories")
+	intelFlag := fs.String("threat-intel", "", "comma-separated STIX 2.1, CSV, or CIDR threat feed files")
+	assetsFlag := fs.String("assets", "", "comma-separated asset criticality YAML/JSON files")
+	return sigmaFlag, intelFlag, assetsFlag
+}
+
+func applyOverlays(pol *policy.Policy, sigmaCSV, intelCSV, assetsCSV string) error {
+	splitAdd := func(dst *[]string, raw string) {
+		for _, item := range strings.Split(raw, ",") {
+			if t := strings.TrimSpace(item); t != "" {
+				*dst = append(*dst, t)
+			}
+		}
+	}
+	splitAdd(&pol.SigmaPaths, sigmaCSV)
+	splitAdd(&pol.ThreatIntelPaths, intelCSV)
+	splitAdd(&pol.AssetPaths, assetsCSV)
+	return pol.ValidateAndCompile()
 }
 
 func cmdVerifyRules(args []string, stdout, stderr io.Writer) int {
@@ -334,6 +406,8 @@ func cmdVerifyRules(args []string, stdout, stderr io.Writer) int {
 			"path":               p,
 			"valid":              true,
 			"custom_rules":       len(pol.CustomRules),
+			"sequence_rules":     len(pol.SequenceRules),
+			"sigma_rules":        len(pol.SigmaRules),
 			"routes":             len(pol.Routes),
 			"suppressions":       len(pol.Suppressions),
 			"suppression_window": pol.SuppressionWindow,

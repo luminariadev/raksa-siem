@@ -1,0 +1,30 @@
+min_severity: low
+suppression_window: 10m
+
+sigma_paths:
+  - sigma-rules.yml
+
+threat_intel_paths:
+  - stix-feed.json
+
+asset_paths:
+  - assets.yml
+
+sequence_rules:
+  - id: ORG-SEQ-01
+    title: Brute-force followed by host execution and IoC hit
+    severity: critical
+    window: 15m
+    group_by: src_ip
+    steps:
+      - name: login_failures
+        match:
+          category: auth
+          outcome: failure
+      - name: process_execution
+        match:
+          category: process
+          action: exec
+      - name: runtime_ioc
+        match:
+          layer: ioc-defense

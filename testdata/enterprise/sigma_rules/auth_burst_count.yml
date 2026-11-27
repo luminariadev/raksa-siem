@@ -1,0 +1,14 @@
+title: Windows and Auth Logon Failure Burst
+id: SIGMA-ENT-003
+status: stable
+description: Detects 3 or more failed logins grouped by source IP within 10 minutes.
+level: high
+tags:
+  - attack.credential_access
+  - attack.t1110
+detection:
+  selection:
+    category: auth
+    outcome: failure
+  condition: selection | count() by src_ip >= 3
+  timeframe: 10m

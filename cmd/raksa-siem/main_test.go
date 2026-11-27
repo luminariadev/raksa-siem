@@ -49,21 +49,38 @@ func TestCLIAnalyzeCleanAndAttackChainExitCodes(t *testing.T) {
 		t.Fatalf("rules failed: %d %s", code, errRules.String())
 	}
 	var rules []schema.RuleInfo
-	if err := json.Unmarshal(outRules.Bytes(), &rules); err != nil || len(rules) != 20 {
-		t.Fatalf("expected 20 rules, got %d err=%v", len(rules), err)
+	if err := json.Unmarshal(outRules.Bytes(), &rules); err != nil || len(rules) != 23 {
+		t.Fatalf("expected 23 rules, got %d err=%v", len(rules), err)
 	}
 
-	// 5. Verify-rules & test-alert subcommands
+	// 5. Verify-rules, verify-sigma & test-alert subcommands
 	var outVerify, errVerify bytes.Buffer
 	if code := run([]string{"verify-rules", filepath.Join("..", "..", "examples", "raksa-siem.yml"), filepath.Join("..", "..", "examples", "custom-rules.yml")}, strings.NewReader(""), &outVerify, &errVerify); code != 0 {
 		t.Fatalf("verify-rules failed: %d stderr=%s", code, errVerify.String())
+	}
+	var outSigma, errSigma bytes.Buffer
+	if code := run([]string{"verify-sigma", filepath.Join("..", "..", "testdata", "enterprise", "sigma_rules")}, strings.NewReader(""), &outSigma, &errSigma); code != 0 {
+		t.Fatalf("verify-sigma failed: %d stderr=%s", code, errSigma.String())
 	}
 	var outAlert, errAlert bytes.Buffer
 	if code := run([]string{"test-alert", "--policy", filepath.Join("..", "..", "examples", "raksa-siem.yml"), "--dry-run"}, strings.NewReader(""), &outAlert, &errAlert); code != 0 {
 		t.Fatalf("test-alert failed: %d stderr=%s", code, errAlert.String())
 	}
 
-	// 6. Baseline gating test
+	// 6. Enterprise fixture analyze gate (Sigma + sequence + STIX/CIDR + tier1 escalation)
+	var outEnt, errEnt bytes.Buffer
+	codeEnt := run([]string{"analyze", filepath.Join("..", "..", "testdata", "enterprise"), "--policy", filepath.Join("..", "..", "testdata", "enterprise", "enterprise_policy.yml"), "--output", "json", "--fail-on", "high"}, strings.NewReader(""), &outEnt, &errEnt)
+	if codeEnt != 1 {
+		t.Fatalf("expected exit 1 on enterprise fixtures, got %d stderr=%s out=%s", codeEnt, errEnt.String(), outEnt.String())
+	}
+	entJSON := outEnt.String()
+	for _, want := range []string{"SIEM-206", "SIEM-403", "SIEM-502", "tier1"} {
+		if !strings.Contains(entJSON, want) {
+			t.Fatalf("expected %q in enterprise analyze output: %s", want, entJSON)
+		}
+	}
+
+	// 7. Baseline gating test
 	baseFile := filepath.Join(t.TempDir(), "baseline.json")
 	var outBase, errBase bytes.Buffer
 	_ = run([]string{"analyze", filepath.Join("..", "..", "testdata", "attack_chain"), "--write-baseline", baseFile, "--output", "json"}, strings.NewReader(""), &outBase, &errBase)

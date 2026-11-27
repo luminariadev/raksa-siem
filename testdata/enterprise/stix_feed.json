@@ -1,0 +1,18 @@
+{
+  "type": "bundle",
+  "id": "bundle--22222222-2222-2222-2222-222222222222",
+  "objects": [
+    {
+      "type": "indicator",
+      "name": "Synthetic External Attacker IP",
+      "confidence": 85,
+      "pattern": "[ipv4-addr:value = '198.51.100.88']"
+    },
+    {
+      "type": "indicator",
+      "name": "Synthetic Stage Domain",
+      "confidence": 90,
+      "pattern": "[domain-name:value = 'c2-drop.example.invalid']"
+    }
+  ]
+}

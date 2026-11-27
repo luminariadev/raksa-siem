@@ -1,0 +1,16 @@
+{
+  "Records": [
+    {
+      "eventID": "ct-ent-01",
+      "eventTime": "2026-11-27T10:00:25Z",
+      "eventSource": "cloudtrail.amazonaws.com",
+      "eventName": "StopLogging",
+      "sourceIPAddress": "198.51.100.88",
+      "awsRegion": "us-east-1",
+      "userIdentity": {
+        "type": "IAMUser",
+        "userName": "ci-compromised"
+      }
+    }
+  ]
+}

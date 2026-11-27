@@ -1,0 +1,18 @@
+title: AWS CloudTrail Logging Tamper
+id: SIGMA-ENT-002
+status: stable
+description: Detects CloudTrail StopLogging or DeleteTrail actions.
+level: critical
+tags:
+  - attack.defense_evasion
+  - attack.t1562
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventSource: cloudtrail.amazonaws.com
+    eventName:
+      - StopLogging
+      - DeleteTrail
+  condition: selection

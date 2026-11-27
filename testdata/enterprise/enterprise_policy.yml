@@ -1,0 +1,37 @@
+min_severity: low
+suppression_window: 10m
+auth_burst_threshold: 5
+web_probe_threshold: 5
+
+sigma_paths:
+  - sigma_rules
+
+threat_intel_paths:
+  - stix_feed.json
+  - cidr_blocklist.txt
+
+asset_paths:
+  - assets.yml
+
+sequence_rules:
+  - id: SEQ-ENT-KILLCHAIN
+    title: Auth failures followed by auditd exec and Suricata alert
+    description: Ordered 3-stage kill chain correlated across win-evtx/auth, auditd, and Suricata telemetry.
+    severity: critical
+    window: 15m
+    group_by: src_ip
+    mitre_d3fend: D3-SCA
+    steps:
+      - name: failed_auth
+        match:
+          category: auth
+          outcome: failure
+      - name: auditd_exec
+        match:
+          source_format: auditd
+          category: process
+          action: exec
+      - name: suricata_alert
+        match:
+          source_format: suricata
+          category: network

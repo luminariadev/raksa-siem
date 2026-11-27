@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/luminariadev/raksa-siem/internal/correlator"
+	"github.com/luminariadev/raksa-siem/internal/intel"
 	"github.com/luminariadev/raksa-siem/internal/normalizer"
 	"github.com/luminariadev/raksa-siem/internal/policy"
 	"github.com/luminariadev/raksa-siem/internal/router"
 	"github.com/luminariadev/raksa-siem/internal/schema"
+	"github.com/luminariadev/raksa-siem/internal/sigma"
 )
 
 const (
@@ -174,25 +176,28 @@ func (s *Server) toolDefinitions() []toolDefinition {
 	return []toolDefinition{
 		{
 			Name:        "siem_list_rules",
-			Description: "List all 20 built-in SIEM correlation rules with metadata and MITRE D3FEND mappings.",
+			Description: "List all 23 built-in SIEM correlation rules with metadata and MITRE D3FEND mappings.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"module": map[string]any{"type": "string", "description": "Optional module filter: auth, web-net, cross-layer, ops, custom, watchlist"},
+					"module": map[string]any{"type": "string", "description": "Optional module filter: auth, web-net, correlation, ops, custom, policy"},
 				},
 			},
 		},
 		{
 			Name:        "siem_analyze_logs",
-			Description: "Normalize and correlate multi-format security logs and return Raksa Finding Schema v1 report.",
+			Description: "Normalize and correlate multi-format security logs (including .gz, Sigma, sequence, STIX 2.1/CIDR, and asset tiers) and return Raksa Finding Schema v1 report.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":        map[string]any{"type": "string", "description": "Log file or directory path"},
-					"paths":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"content":     map[string]any{"type": "string", "description": "Inline raw log or report content"},
-					"format":      map[string]any{"type": "string", "description": "auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef"},
-					"policy_path": map[string]any{"type": "string", "description": "Optional .raksa-siem.yml policy file"},
+					"path":               map[string]any{"type": "string", "description": "Log file or directory path"},
+					"paths":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"content":            map[string]any{"type": "string", "description": "Inline raw log or report content"},
+					"format":             map[string]any{"type": "string", "description": "auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef, auditd, cloudtrail, k8s-audit, suricata, win-evtx, leef"},
+					"policy_path":        map[string]any{"type": "string", "description": "Optional .raksa-siem.yml policy file"},
+					"sigma_paths":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"threat_intel_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"asset_paths":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				},
 			},
 		},
@@ -202,8 +207,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"paths":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"policy_path": map[string]any{"type": "string"},
+					"paths":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"policy_path":        map[string]any{"type": "string"},
+					"sigma_paths":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"threat_intel_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				},
 			},
 		},
@@ -274,6 +281,33 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"store_path": map[string]any{"type": "string"},
 					"limit":      map[string]any{"type": "integer"},
 				},
+			},
+		},
+		{
+			Name:        "siem_verify_sigma",
+			Description: "Compile and fail-closed validate native Sigma YAML rule files or directories.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path":  map[string]any{"type": "string"},
+					"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+			},
+		},
+		{
+			Name:        "siem_match_threat_intel",
+			Description: "Match normalized telemetry events or IOC observables against STIX 2.1 JSON, CSV, or CIDR threat feeds.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"threat_intel_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"path":               map[string]any{"type": "string"},
+					"content":            map[string]any{"type": "string"},
+					"format":             map[string]any{"type": "string"},
+					"src_ip":             map[string]any{"type": "string"},
+					"host":               map[string]any{"type": "string"},
+				},
+				"required": []string{"threat_intel_paths"},
 			},
 		},
 	}
@@ -363,6 +397,12 @@ func (s *Server) callTool(name string, args map[string]any) toolCallResult {
 	case "siem_query_incidents":
 		return s.toolQueryIncidents(args)
 
+	case "siem_verify_sigma":
+		return s.toolVerifySigma(args)
+
+	case "siem_match_threat_intel":
+		return s.toolMatchThreatIntel(args)
+
 	default:
 		return errTool("unknown tool: " + name)
 	}
@@ -376,6 +416,18 @@ func (s *Server) toolAnalyze(args map[string]any, forceRaksa bool) toolCallResul
 			return errTool("load policy: " + err.Error())
 		}
 		pol = loaded
+	}
+	if extra := strSliceArg(args, "sigma_paths"); len(extra) > 0 {
+		pol.SigmaPaths = append(append([]string(nil), pol.SigmaPaths...), extra...)
+	}
+	if extra := strSliceArg(args, "threat_intel_paths"); len(extra) > 0 {
+		pol.ThreatIntelPaths = append(append([]string(nil), pol.ThreatIntelPaths...), extra...)
+	}
+	if extra := strSliceArg(args, "asset_paths"); len(extra) > 0 {
+		pol.AssetPaths = append(append([]string(nil), pol.AssetPaths...), extra...)
+	}
+	if err := pol.ValidateAndCompile(); err != nil {
+		return errTool("compile policy overlays: " + err.Error())
 	}
 
 	defFmt := normalizer.FormatAuto
@@ -562,7 +614,7 @@ func ExpandInputFiles(paths []string) ([]string, error) {
 			}
 			ext := strings.ToLower(filepath.Ext(d.Name()))
 			switch ext {
-			case ".log", ".json", ".ndjson", ".jsonl", ".txt", ".cef":
+			case ".log", ".json", ".ndjson", ".jsonl", ".txt", ".cef", ".gz":
 				if !seen[p] {
 					seen[p] = true
 					files = append(files, p)
@@ -585,6 +637,104 @@ func parseFormatOrDefault(raw, def string) (string, error) {
 		return def, nil
 	}
 	return normalizer.ParseFormat(raw)
+}
+
+func (s *Server) toolVerifySigma(args map[string]any) toolCallResult {
+	paths := strSliceArg(args, "paths")
+	if p := strArg(args, "path"); p != "" {
+		paths = append([]string{p}, paths...)
+	}
+	if len(paths) == 0 {
+		return errTool("provide path or paths to Sigma YAML file/directory")
+	}
+	var all []*sigma.Rule
+	for _, p := range paths {
+		rules, err := sigma.LoadPath(p)
+		if err != nil {
+			return errTool(err.Error())
+		}
+		all = append(all, rules...)
+	}
+	return okJSON(map[string]any{
+		"valid": true,
+		"count": len(all),
+		"rules": all,
+	})
+}
+
+func (s *Server) toolMatchThreatIntel(args map[string]any) toolCallResult {
+	feedPaths := strSliceArg(args, "threat_intel_paths")
+	if len(feedPaths) == 0 {
+		return errTool("threat_intel_paths is required")
+	}
+	feed := intel.NewThreatFeed()
+	for _, p := range feedPaths {
+		if err := feed.LoadFile(p); err != nil {
+			return errTool(err.Error())
+		}
+	}
+
+	var events []schema.Event
+	if strArg(args, "content") != "" || strArg(args, "path") != "" || len(strSliceArg(args, "paths")) > 0 {
+		normFmt, err := parseFormatOrDefault(strArg(args, "format"), normalizer.FormatAuto)
+		if err != nil {
+			return errTool(err.Error())
+		}
+		loaded, _, err := loadEventsFromArgs(args, normFmt)
+		if err != nil {
+			return errTool(err.Error())
+		}
+		events = loaded
+	} else {
+		events = []schema.Event{{
+			ID:        "mcp-probe",
+			Timestamp: time.Now().UTC(),
+			SrcIP:     strArg(args, "src_ip"),
+			Host:      strArg(args, "host"),
+		}}
+	}
+
+	var hits []map[string]any
+	for _, ev := range events {
+		for _, m := range feed.MatchEvent(ev) {
+			hits = append(hits, map[string]any{
+				"event_id":  ev.ID,
+				"indicator": m.Indicator.Value,
+				"kind":      m.Indicator.Kind,
+				"severity":  m.Indicator.Severity,
+				"source":    m.Indicator.Source,
+				"matched":   m.MatchedOn,
+				"value":     m.MatchedVal,
+			})
+		}
+	}
+	return okJSON(map[string]any{
+		"indicators_loaded": feed.Count(),
+		"events_checked":    len(events),
+		"match_count":       len(hits),
+		"matches":           hits,
+	})
+}
+
+func strSliceArg(args map[string]any, key string) []string {
+	if args == nil {
+		return nil
+	}
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range arr {
+		if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
 }
 
 func strArg(args map[string]any, key string) string {

@@ -1,0 +1,15 @@
+title: Suspicious Auditd Probe Execution
+id: SIGMA-ENT-001
+status: test
+description: Detects suspicious staging probe execution on Linux auditd records.
+level: medium
+tags:
+  - attack.execution
+  - attack.t1059
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    CommandLine|contains: "curl_stage_probe"
+  condition: selection

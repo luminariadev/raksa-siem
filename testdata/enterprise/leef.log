@@ -1,0 +1,1 @@
+LEEF:2.0|IBM|QRadarFirewall|1.0|ACL-DENY|^|src=203.0.113.210^dst=198.51.100.10^dstPort=5432^devName=prod-core-01^usrName=guest^sev=8^msg=Database port probe blocked

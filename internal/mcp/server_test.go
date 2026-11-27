@@ -3,13 +3,21 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/luminariadev/raksa-siem/internal/policy"
 )
 
-func TestMCPServeAllEightTools(t *testing.T) {
+func TestMCPServeAllTenTools(t *testing.T) {
+	dir := t.TempDir()
+	sigmaFile := filepath.Join(dir, "sigma.yml")
+	_ = os.WriteFile(sigmaFile, []byte("title: MCP Sigma Probe\nid: SIG-M1\nlevel: high\ndetection:\n  sel:\n    category: ops\n  condition: sel\n"), 0o600)
+	intelFile := filepath.Join(dir, "intel.txt")
+	_ = os.WriteFile(intelFile, []byte("198.51.100.50\n"), 0o600)
+
 	pol := policy.DefaultPolicy()
 	pol.AuthBurstThreshold = 3
 	srv := New(pol)
@@ -52,6 +60,17 @@ func TestMCPServeAllEightTools(t *testing.T) {
 			"name":      "siem_query_incidents",
 			"arguments": map[string]any{"rule_id": "SIEM-001"},
 		}}),
+		mustMarshal(map[string]any{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": map[string]any{
+			"name":      "siem_verify_sigma",
+			"arguments": map[string]any{"path": sigmaFile},
+		}}),
+		mustMarshal(map[string]any{"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": map[string]any{
+			"name": "siem_match_threat_intel",
+			"arguments": map[string]any{
+				"threat_intel_paths": []string{intelFile},
+				"src_ip":             "198.51.100.50",
+			},
+		}}),
 	)
 
 	var out bytes.Buffer
@@ -60,18 +79,18 @@ func TestMCPServeAllEightTools(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("expected 7 JSON-RPC responses (notification omitted), got %d: %s", len(lines), out.String())
+	if len(lines) != 9 {
+		t.Fatalf("expected 9 JSON-RPC responses (notification omitted), got %d: %s", len(lines), out.String())
 	}
 
-	// Verify 8 tools listed
+	// Verify 10 tools listed
 	var listResp struct {
 		Result struct {
 			Tools []toolDefinition `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(lines[1]), &listResp); err != nil || len(listResp.Result.Tools) != 8 {
-		t.Fatalf("expected 8 MCP tools, got %d err=%v", len(listResp.Result.Tools), err)
+	if err := json.Unmarshal([]byte(lines[1]), &listResp); err != nil || len(listResp.Result.Tools) != 10 {
+		t.Fatalf("expected 10 MCP tools, got %d err=%v", len(listResp.Result.Tools), err)
 	}
 
 	// Verify analyze returned SIEM-001, suppression 1st allowed 2nd suppressed, query found SIEM-001
@@ -86,5 +105,11 @@ func TestMCPServeAllEightTools(t *testing.T) {
 	}
 	if !strings.Contains(lines[6], "SIEM-001") {
 		t.Fatalf("expected SIEM-001 in siem_query_incidents: %s", lines[6])
+	}
+	if !strings.Contains(lines[7], "SIG-M1") {
+		t.Fatalf("expected SIG-M1 in siem_verify_sigma: %s", lines[7])
+	}
+	if !strings.Contains(lines[8], "198.51.100.50") {
+		t.Fatalf("expected 198.51.100.50 in siem_match_threat_intel: %s", lines[8])
 	}
 }

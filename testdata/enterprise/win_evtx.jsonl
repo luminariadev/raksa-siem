@@ -1,0 +1,3 @@
+{"EventID":4625,"TimeCreated":"2026-11-27T10:00:01Z","Computer":"prod-core-01","Channel":"Security","TargetUserName":"admin","IpAddress":"198.51.100.88"}
+{"EventID":4625,"TimeCreated":"2026-11-27T10:00:02Z","Computer":"prod-core-01","Channel":"Security","TargetUserName":"root","IpAddress":"198.51.100.88"}
+{"EventID":4625,"TimeCreated":"2026-11-27T10:00:03Z","Computer":"prod-core-01","Channel":"Security","TargetUserName":"ops","IpAddress":"198.51.100.88"}

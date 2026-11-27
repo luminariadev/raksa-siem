@@ -1,0 +1,7 @@
+assets:
+  - host: prod-db-01
+    tier: tier1
+    owner: platform-security
+  - host: bastion-01
+    tier: tier2
+    owner: sre-team
