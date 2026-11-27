@@ -2,6 +2,17 @@
 
 All notable changes to `raksa-siem` are documented in this file.
 
+## [0.2.0] - 2026-11-27
+
+### Added
+- **6 Enterprise Telemetry Parsers + Bounded Gzip Ingestion (`internal/normalizer`)**: Added `auditd`, `cloudtrail` (single event and `Records` envelopes), `k8s-audit`, `suricata` EVE JSON, `win-evtx` JSON, and IBM `leef` (`v1.0`/`v2.0`) alongside transparent `64 MiB`-capped gzip decompression (13 total formats + `auto`).
+- **Native Pure-Go Sigma YAML Engine (`internal/sigma`) & `SIEM-403`**: Compiles multi-document Sigma rules supporting wildcards, `|contains`, `|startswith`, `|endswith`, `|re`, `|cidr`, `|base64` (3-offset), `|all`, `|cased`, recursive boolean AST (`and`/`or`/`not`/`1 of`/`all of`), `logsource`, MITRE ATT&CK tags, and `timeframe` + `count(...) by ...` aggregations with fail-closed validation.
+- **Ordered Multi-Step Sequence Correlation (`SIEM-206`)**: EQL-style ordered kill-chain progression (`sequence_rules` with >=2 steps inside bounded sliding windows) in `internal/policy` and `internal/correlator`.
+- **STIX 2.1 / CIDR Threat Intel & Asset Criticality (`internal/intel`, `SIEM-502`)**: Loads STIX 2.1 JSON bundles, CSV, and plaintext IP/CIDR/domain lists (`SIEM-502`) plus YAML/JSON `AssetCatalog` (`tier1` automatically escalates matching incident severity by one level).
+- **Syslog UDP/TCP Network Receiver (`internal/server/syslog.go`)**: Added bounded UDP (`64 KiB`) and TCP (`256 KiB` line, `128` max connections, `60s` idle timeout) RFC 3164/5424 listeners via `serve --syslog-udp` / `--syslog-tcp` with Prometheus counters.
+- **11-Subcommand CLI & 10-Tool MCP Server**: Added `verify-sigma`, overlay flags (`--sigma`, `--threat-intel`, `--assets`), and MCP tools `siem_verify_sigma` + `siem_match_threat_intel`.
+- **Python SDK v0.2.0 (`raksa-siem-sdk`)**: Parity upgrade adding all 13 log formats, bounded `.gz` `normalize_file`, stdlib `ThreatFeed` (STIX 2.1 + CIDR), `SequenceRule`, and `AssetCatalog`.
+
 ## [0.1.0] - 2026-11-27
 
 ### Added
