@@ -7,21 +7,21 @@
 [![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
 [![Python SDK 3.11+](https://img.shields.io/badge/python%20sdk-3.11%2B-3776ab.svg)](sdk/python/README.md)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-4c1.svg)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
-[![MCP](https://img.shields.io/badge/MCP-10%20tools-6f42c1.svg)](#mcp-server-integration-raksa-siem-mcp)
+[![MCP](https://img.shields.io/badge/MCP-12%20tools-6f42c1.svg)](#mcp-server-integration-raksa-siem-mcp)
 
-Layer 6 (`observability-siem`) of the **Raksa Security Suite**: a fast, clusterless, single-binary security log normalizer, cross-layer correlator, native Sigma YAML engine, continuous tailer, authenticated HTTP/Syslog collector, MCP server, and zero-dependency Python SDK.
+Layer 6 (`observability-siem`) of the **Raksa Security Suite**: a fast, clusterless, single-binary security log normalizer, cross-layer correlator, native Sigma YAML engine, tamper-evident hash-chained ledger with case triage, TLS/mTLS & RBAC collector, MCP server, and zero-dependency Python SDK.
 
-`raksa-siem` correlates telemetry from upstream Raksa layers (`raksa-netguard`, `raksa-hostguard`, `raksa-webshield`, `raksa-pipeguard`, `raksa-iocscan`) alongside enterprise host, cloud, container, IDS, and web logs into Raksa Finding Schema v1 incidents, chronological timelines, SARIF 2.1.0 reports, Prometheus metrics, and deduplicated alert routes.
+`raksa-siem` correlates telemetry from upstream Raksa layers (`raksa-netguard`, `raksa-hostguard`, `raksa-webshield`, `raksa-pipeguard`, `raksa-iocscan`) alongside enterprise host, cloud, container, IDS, and web logs into Raksa Finding Schema v1 incidents, offline HTML attack-graph dashboards, MITRE ATT&CK Navigator layers, Prometheus metrics, and reliable DLQ-backed alert routes.
 
-## Highlights (`v0.2.0`)
+## Highlights (`v0.3.0`)
 
 - **13 Input Formats + Auto-Detection + Bounded `.gz`**: `raksa` (Layer 1-5 Finding JSON reports), `raksa-ndjson`, `auth`, `syslog`, `nginx`, `jsonl`, `cef`, `auditd`, `cloudtrail`, `k8s-audit`, `suricata`, `win-evtx`, and `leef`, with transparent `64 MiB`-capped gzip ingestion.
-- **23 Built-In Rules (`SIEM-001`..`502`)**: Covers brute-force bursts, password spraying, compromise-after-failures, multi-IP logins, privilege changes, 4xx/5xx web probes, cross-layer IP/host correlation (`SIEM-201`..`205`), multi-step EQL-style sequences (`SIEM-206`), alert storms, log tampering, native Sigma YAML detections (`SIEM-403`), policy watchlists (`SIEM-501`), and STIX 2.1/CIDR feeds (`SIEM-502`).
-- **Native Pure-Go Sigma YAML Engine (`verify-sigma`)**: Compiles multi-document Sigma YAML (`wildcards`, `contains`, `startswith`, `endswith`, `re`, `cidr`, `base64`, `all`, `cased`, recursive `and`/`or`/`not`/`1 of`/`all of`, `timeframe`, and `count() by` aggregations) at `675.6 ns/op` with zero external rule-engine dependencies.
-- **STIX 2.1 / CIDR Threat Intel & Asset Criticality**: Ingests STIX 2.1 bundles, CSVs, and CIDR blocklists while automatically escalating finding severity on `tier1` critical assets.
-- **Fail-Closed Policy & Baselines**: Waivers require both a non-empty `reason` and non-expired `expires_on`; webhook/Slack/Discord sinks require `https://` (or `localhost` / `127.0.0.1`); deterministic SHA-256 baseline gating integrates cleanly in CI.
-- **Continuous Tailer, Syslog UDP/TCP & Authenticated HTTP API**: `watch` handles partial lines, truncation/rotation, `--siem-out`, and `/metrics`; `serve` runs HTTP ingest/query endpoints (`X-API-Key` / Bearer, NDJSON store) alongside bounded `--syslog-udp` and `--syslog-tcp` RFC 3164/5424 listeners.
-- **Minimal Dependency Footprint**: Go binary imports only `gopkg.in/yaml.v3 v3.0.1`; Python SDK (`raksa-siem-sdk v0.2.0`) uses 100% Python stdlib (`dependencies = []`).
+- **23 Built-In Rules (`SIEM-001`..`502`) & Native Sigma YAML**: Brute-force bursts, password spraying, compromise-after-failures, multi-IP logins, privilege changes, web probes, cross-layer IP/host correlation (`SIEM-201`..`205`), multi-step EQL-style sequences (`SIEM-206`), alert storms, log tampering, native pure-Go Sigma YAML detections (`SIEM-403` at `694.4 ns/op`), policy watchlists (`SIEM-501`), and STIX 2.1/CIDR feeds (`SIEM-502`) with `tier1` asset severity escalation.
+- **Tamper-Evident Hash-Chained Ledger & Case Triage**: Date-segmented `siem-YYYY-MM-DD.ndjson` storage chaining every event, finding, and triage update with `SHA-256(seq|timestamp|kind|prev_hash|<compact_payload>)`, startup `--retention-days` pruning, historical search, case workflow (`open`, `ack`, `resolved`, `false_positive`), and independent Go + Python chain verification.
+- **7 Report Formats Including Offline HTML Graph & ATT&CK Navigator**: Export `table`, `json`, `sarif` (2.1.0), `markdown`, `ndjson`, self-contained dark-mode `html` (inline SVG entity attack graph, interactive severity filters, zero external CDN/scripts), and `attack-nav` (MITRE ATT&CK Navigator v4.5 JSON).
+- **8 Alert Sinks, Exponential Retry & Dead-Letter Queue (DLQ)**: Dispatches deduplicated alerts to HMAC-SHA256 `webhook`, `slack`, `discord`, `telegram`, `teams`, `pagerduty`, `opsgenie`, and `file` with bounded retry backoff (`max_retries` `0..5`), failed-delivery `dlq_path` recording, and `ReplayDLQ`.
+- **TLS 1.2+/mTLS, Scoped RBAC & Hot-Reload Server**: `serve` enforces mutual TLS (`--tls-client-ca`), scoped API keys (`--ingest-key-env`, `--read-key-env`, `--admin-key-env`), atomic policy hot-reload via `SIGHUP` or `POST /api/v1/reload`, bounded `--syslog-udp` / `--syslog-tcp`, and Prometheus `/metrics`.
+- **Minimal Dependency Footprint**: Go binary imports only `gopkg.in/yaml.v3 v3.0.1`; Python SDK (`raksa-siem-sdk v0.3.0`) uses 100% Python stdlib (`dependencies = []`).
 
 ## Quick Start
 
@@ -33,14 +33,16 @@ cd raksa-siem
 go build -ldflags="-s -w" -o raksa-siem ./cmd/raksa-siem
 ```
 
-Run clean, multi-layer, and enterprise Sigma/sequence fixtures:
+Run clean, multi-layer, enterprise, offline HTML, and ledger verification workflows:
 
 ```bash
 # Clean baseline telemetry -> exit 0, Posture 100/100 (A+)
 ./raksa-siem analyze testdata/clean --fail-on high --output table
 
-# Multi-layer attack chain (auth + nginx + netguard + pipeguard + iocscan) -> exit 1
+# Multi-layer attack chain -> SARIF 2.1.0, offline HTML graph, or MITRE ATT&CK Navigator v4.5
 ./raksa-siem analyze testdata/attack_chain --fail-on high --output sarif > siem.sarif
+./raksa-siem analyze testdata/attack_chain --output html > attack-graph.html
+./raksa-siem analyze testdata/attack_chain --output attack-nav > attck-layer.json
 
 # Enterprise pipeline (auditd + CloudTrail + K8s Audit + Suricata + WinEVTX + LEEF + Sigma + Sequence + STIX/CIDR + tier1 assets)
 ./raksa-siem analyze testdata/enterprise --policy testdata/enterprise/enterprise_policy.yml --fail-on high --output json
@@ -50,42 +52,65 @@ Run clean, multi-layer, and enterprise Sigma/sequence fixtures:
 ./raksa-siem verify-sigma testdata/enterprise/sigma_rules
 ./raksa-siem test-alert --policy examples/raksa-siem.yml --dry-run
 
-# Start HTTP ingest + Syslog UDP/TCP collector
-./raksa-siem serve --addr 127.0.0.1:8484 --syslog-udp 127.0.0.1:5514 --syslog-tcp 127.0.0.1:5515 --policy examples/sequence-policy.yml
+# Start hardened TLS/mTLS HTTP + RBAC + hash-chained ledger + Syslog collector
+./raksa-siem serve \
+  --addr 127.0.0.1:8484 \
+  --syslog-udp 127.0.0.1:5514 \
+  --syslog-tcp 127.0.0.1:5515 \
+  --ledger-dir ./siem-ledger \
+  --retention-days 30 \
+  --policy examples/sequence-policy.yml \
+  --ingest-key-env SIEM_INGEST_KEY \
+  --read-key-env SIEM_READ_KEY \
+  --admin-key-env SIEM_ADMIN_KEY
+
+# Triage an incident case and cryptographically verify ledger integrity
+./raksa-siem case --dir ./siem-ledger --action update --finding-id fnd-1 --status ack --assignee soc-lead --note "investigating"
+./raksa-siem verify-ledger --dir ./siem-ledger --output table
 ```
 
-## CLI Subcommands (11)
+## CLI Subcommands (13)
 
 | Subcommand | Purpose |
 | :--- | :--- |
-| `analyze` | Normalize logs/reports (13 formats + `.gz`), run 23 rules + Sigma/sequence/TI/assets, exit `0`/`1`/`2`. |
+| `analyze` | Normalize logs/reports (13 formats + `.gz`), run 23 rules + Sigma/sequence/TI/assets, output 7 formats, exit `0`/`1`/`2`. |
 | `correlate` | Correlate upstream Layer 1-5 Raksa JSON/NDJSON reports across IP and host boundaries. |
 | `normalize` | Convert raw multi-format telemetry into canonical `schema.Event` JSON or `--ndjson`. |
 | `watch` | Tail log files/directories continuously with rotation recovery, `--siem-out`, and `/metrics`. |
-| `serve` | Run authenticated HTTP SIEM ingest/query API and optional `--syslog-udp` / `--syslog-tcp` listeners. |
+| `serve` | Run HTTP/TLS/mTLS RBAC server (`/api/v1/ingest`, `/search`, `/cases`, `/ledger/verify`, `/reload`), `SIGHUP` reload, and Syslog UDP/TCP. |
 | `verify-rules` | Fail-closed YAML/JSON policy, sequence rule, custom regex, waiver, and sink URL validation. |
 | `verify-sigma` | Compile and fail-closed validate native Sigma YAML rule files or directories. |
-| `test-alert` | Dispatch a synthetic alert (`--dry-run` by default) to test configured sinks and HMAC signing. |
+| `verify-ledger` | Cryptographically verify `SHA-256` hash-chain continuity across an audit ledger directory (exit `1` on tamper). |
+| `case` | List (`--action list`) or triage (`--action update`) incident cases with assignee and audit notes. |
+| `test-alert` | Dispatch a synthetic alert (`--dry-run` by default) to test configured sinks, retries, and HMAC signing. |
 | `rules` | List built-in `SIEM-001`..`502` rules (`--module` and `--output table|json`). |
-| `mcp` | Launch the 10-tool stdio JSON-RPC 2.0 MCP server. |
-| `version` | Print binary version, Raksa Schema version (`1.0`), and layer (`siem`). |
+| `mcp` | Launch the 12-tool stdio JSON-RPC 2.0 MCP server. |
+| `version` | Print binary version (`0.3.0`), Raksa Schema version (`1.0`), and layer (`siem`). |
 
 Overlay flags `--sigma`, `--threat-intel`, and `--assets` (comma-separated) can be supplied to `analyze`, `correlate`, `watch`, and `serve`.
 
 ## Exit Codes
 
-- `0`: Completed with no remaining findings meeting `--fail-on` (default `high`).
-- `1`: One or more correlated incidents met or exceeded `--fail-on`.
-- `2`: Invalid usage, fail-closed policy/Sigma validation error, or runtime failure.
+- `0`: Completed cleanly with no remaining findings meeting `--fail-on` (or valid ledger on `verify-ledger`).
+- `1`: One or more correlated incidents met or exceeded `--fail-on`, or `verify-ledger` detected chain tampering.
+- `2`: Invalid usage, fail-closed policy/Sigma validation error, or runtime/IO failure.
 
-## Python SDK (`raksa-siem-sdk v0.2.0`)
+## Python SDK (`raksa-siem-sdk v0.3.0`)
 
 ```bash
 pip install ./sdk/python
 ```
 
 ```python
-from raksa_siem_sdk import AssetCatalog, AssetEntry, Correlator, SiemClient, ThreatFeed, normalize_file
+from raksa_siem_sdk import (
+    AssetCatalog,
+    AssetEntry,
+    Correlator,
+    SiemClient,
+    ThreatFeed,
+    normalize_file,
+    verify_ledger_dir,
+)
 
 feed = ThreatFeed()
 feed.load_file("examples/stix-feed.json")
@@ -94,28 +119,41 @@ assets = AssetCatalog([AssetEntry(host="prod-db-01", tier="tier1", owner="secops
 events = normalize_file("testdata/enterprise/auditd.log")
 findings, timeline = Correlator(threat_feed=feed, asset_catalog=assets).analyze_batch(events)
 
-# Optional HTTP client against `raksa-siem serve`
-client = SiemClient("http://127.0.0.1:8484", api_key="your-session-key")
+# Optional mTLS & scoped-RBAC HTTP client against `raksa-siem serve`
+client = SiemClient(
+    "https://siem.example.invalid:8484",
+    api_key="your-scoped-token",
+    ca_file="ca.pem",
+    cert_file="client.crt",
+    key_file="client.key",
+)
 resp = client.ingest(events)
+hits = client.search(kind="finding", severity="high")
+rep = client.verify_ledger()
+
+# Independent pure-Python verification of Go's SHA-256 ledger segments
+local_check = verify_ledger_dir("./siem-ledger")
+assert local_check.valid and local_check.tip_hash == rep["tip_hash"]
 ```
 
 See [Python SDK Guide](sdk/python/README.md) for details.
 
-## Benchmarks & Footprint (`v0.2.0`, Windows amd64)
+## Benchmarks & Footprint (`v0.3.0`, Windows amd64)
 
 | Metric | Measured Result |
 | :--- | :--- |
-| Static Go Binary (`-ldflags="-s -w"`) | `8,095,232` bytes (`7.72 MiB`), `1` external module (`gopkg.in/yaml.v3 v3.0.1`) |
-| `BenchmarkNormalizeMixed-12` (1,000 events) | `11.07 ms` (`11,071,476 ns/op`, `3,553,074 B/op`, `33,053 allocs/op`) |
-| `BenchmarkCorrelateEvents-12` (1,000 events) | `0.49 ms` (`494,785 ns/op`, `1,538,341 B/op`, `56 allocs/op`) |
-| `BenchmarkSigmaEval-12` | `675.6 ns/op` (`120 B/op`, `5 allocs/op`) |
-| MCP stdio 51-frame burst (`initialize` + 50 calls) | `20.41 ms` total (`0.408 ms/call`) |
-| Python SDK `v0.2.0` (`1,000` nginx normalize + correlate) | `22.37 ms` (`0` external deps) |
-| Python SDK Wheel (`raksa_siem_sdk-0.2.0-py3-none-any.whl`) | `17,705` bytes |
+| Static Go Binary (`-ldflags="-s -w"`) | `8,688,640` bytes (`8.29 MiB`), `1` external module (`gopkg.in/yaml.v3 v3.0.1`) |
+| `BenchmarkNormalizeMixed-12` (1,000 events) | `11.15 ms` (`11,154,432 ns/op`, `3,548,735 B/op`, `33,052 allocs/op`) |
+| `BenchmarkCorrelateEvents-12` (1,000 events) | `0.54 ms` (`535,615 ns/op`, `1,538,338 B/op`, `56 allocs/op`) |
+| `BenchmarkSigmaEval-12` | `694.4 ns/op` (`120 B/op`, `5 allocs/op`) |
+| `BenchmarkLedgerAppendAndVerify-12` | `0.20 ms` (`203,647 ns/op`, `2,558 B/op`, `24 allocs/op`) |
+| MCP stdio 51-frame burst (`initialize` + 50 calls) | `22.44 ms` total (`0.449 ms/call`) |
+| Python SDK `v0.3.0` (`1,000` nginx normalize + correlate) | `32.17 ms` (`0` external deps) |
+| Python SDK Wheel (`raksa_siem_sdk-0.3.0-py3-none-any.whl`) | `20,312` bytes |
 
 ## MCP Server Integration (`raksa-siem mcp`)
 
-Launch `raksa-siem mcp` over stdio (JSON-RPC 2.0, `2 MiB` bounded line frames) to expose `10` tools to AI coding and security triage agents:
+Launch `raksa-siem mcp` over stdio (JSON-RPC 2.0, `2 MiB` bounded line frames) to expose `12` tools to AI coding and security triage agents:
 
 - `siem_list_rules`: Catalog all 23 built-in `SIEM-*` rules and MITRE D3FEND mappings.
 - `siem_analyze_logs`: Normalize and correlate logs (plain or `.gz`, plus Sigma/intel/assets) into Finding Schema v1 reports.
@@ -127,14 +165,17 @@ Launch `raksa-siem mcp` over stdio (JSON-RPC 2.0, `2 MiB` bounded line frames) t
 - `siem_query_incidents`: Query retained session incidents or an NDJSON incident store.
 - `siem_verify_sigma`: Compile and validate native Sigma YAML rule files or directories.
 - `siem_match_threat_intel`: Match normalized telemetry or observables against STIX 2.1, CSV, or CIDR feeds.
+- `siem_verify_ledger`: Cryptographically verify SHA-256 hash-chain continuity across an audit ledger directory.
+- `siem_triage_case`: Transition case triage status (`open`, `ack`, `resolved`, `false_positive`), assignee, and analyst notes in the ledger.
 
 ## Scope & Boundaries
 
-`raksa-siem` is designed as a lightweight, zero-cluster correlation engine, offline DFIR hunter, CI/CD security gate, and single-binary collector:
+`raksa-siem` is designed as a lightweight, clusterless correlation engine, tamper-evident audit recorder, CI/CD security gate, and single-binary collector:
 
-- Incident and event persistence in `v0.2.0` uses bounded in-memory sliding windows paired with append-only NDJSON files rather than a clustered external search database.
-- Sigma compilation runs natively in pure Go without Python `pysigma` or external transducers, focusing on process creation, cloud audit, Kubernetes, auth, web, DNS/Suricata, and CIDR/regex/base64/count aggregations over normalized fields.
-- Offline telemetry ingestion parses Linux auditd, CloudTrail, Kubernetes Audit JSON, Suricata EVE, Windows Event JSON (`win-evtx`), LEEF, CEF, syslog, auth, nginx, JSONL, and upstream Raksa reports without kernel drivers or raw binary Windows `.evtx` memory-mapping libraries.
+- Historical storage uses local date-segmented SHA-256 hash-chained NDJSON logs (`siem-YYYY-MM-DD.ndjson`) rather than a distributed multi-node database or cluster consensus store.
+- Sigma compilation runs natively in pure Go without Python `pysigma`, targeting normalized security event fields across process, cloud audit, Kubernetes, auth, web, DNS/Suricata, CIDR, regex, base64, and `count() by` aggregations.
+- Windows Event Log ingestion parses exported JSON (`win-evtx`) alongside Linux auditd, CloudTrail, Kubernetes Audit, Suricata EVE, LEEF, CEF, syslog, auth, nginx, JSONL, and upstream Raksa reports without kernel drivers.
+- Signal-based hot-reload uses `SIGHUP` on Unix-like platforms and `POST /api/v1/reload` cross-platform (including Windows).
 
 ## Raksa Security Suite
 

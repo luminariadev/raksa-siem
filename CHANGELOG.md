@@ -2,6 +2,16 @@
 
 All notable changes to `raksa-siem` are documented in this file.
 
+## [0.3.0] - 2026-11-27
+
+### Added
+- **Segmented Hash-Chained Audit Ledger & Case Triage (`internal/ledger`)**: Date-partitioned `siem-YYYY-MM-DD.ndjson` segments where each entry (`seq`, `timestamp`, `kind`, `prev_hash`, `hash`, `payload`) is chained by `SHA-256(seq|timestamp|kind|prev_hash|<compact_payload>)` from a 64-zero genesis hash, paired with startup retention pruning (`--retention-days`), historical search (`Search`), chain integrity checks (`VerifyDir`), and persistent incident case workflows (`open`, `ack`, `resolved`, `false_positive`, assignee, author, audit notes).
+- **Offline HTML Attack-Graph & MITRE ATT&CK Navigator v4.5 Reports (`internal/report`)**: Added `--output html` (self-contained dark-mode HTML5 dashboard with inline SVG entity graph, severity filters, zero external assets, and XSS-safe templating) and `--output attack-nav` (MITRE ATT&CK Navigator v4.5 JSON heatmap export), bringing supported output formats to 7.
+- **Reliable Alert Routing, DLQ & Enterprise Sinks (`internal/policy`, `internal/router`)**: Added bounded exponential retry backoff on network/429/5xx failures (`max_retries` default `3`, clamped `0..5`), NDJSON dead-letter queue persistence (`dlq_path`), `ReplayDLQ`, and native `teams`, `pagerduty`, and `opsgenie` webhook sinks (8 total sink types alongside HMAC `webhook`, `slack`, `discord`, `telegram`, and `file`).
+- **TLS 1.2+/mTLS, Scoped RBAC & Hot-Reload Server (`internal/server`)**: Added `--tls-cert`, `--tls-key`, and `--tls-client-ca` mutual TLS enforcement (`tls.RequireAndVerifyClientCert`), scoped constant-time API tokens (`--ingest-key-env`, `--read-key-env`, `--admin-key-env` with bounded 401/403 request body draining), `SIGHUP` + `POST /api/v1/reload` atomic policy reload, `/api/v1/search`, `/api/v1/cases`, `/api/v1/ledger/verify`, and Prometheus ledger/case gauges.
+- **13-Subcommand CLI & 12-Tool MCP Server (`cmd/raksa-siem`, `internal/mcp`)**: Added CLI subcommands `verify-ledger` and `case` plus MCP tools `siem_verify_ledger` and `siem_triage_case`.
+- **Python SDK v0.3.0 (`raksa-siem-sdk`)**: Added strict TLS 1.2+/mTLS client options (`ca_file`, `cert_file`, `key_file`), `search`, `cases`, `update_case`, `verify_ledger`, `reload_policy`, and zero-dep pure-Python `verify_ledger_dir` verified bit-for-bit against Go ledger chains.
+
 ## [0.2.0] - 2026-11-27
 
 ### Added

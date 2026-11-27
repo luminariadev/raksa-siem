@@ -7,7 +7,7 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
-ARG VERSION=0.2.0
+ARG VERSION=0.3.0
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w -X github.com/luminariadev/raksa-siem/internal/schema.Version=${VERSION}" \
     -o /out/raksa-siem ./cmd/raksa-siem
