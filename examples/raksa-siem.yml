@@ -1,0 +1,32 @@
+min_severity: low
+suppression_window: 10m
+auth_burst_threshold: 5
+web_probe_threshold: 5
+alert_storm_threshold: 10
+
+watched_ips:
+  - 203.0.113.250
+
+watched_hosts:
+  - core-db-01
+
+watched_users:
+  - breakglass-admin
+
+routes:
+  - name: soc-webhook
+    type: webhook
+    url: https://hooks.example.invalid/raksa-siem
+    min_severity: high
+    secret_env: RAKSA_SIEM_HMAC_KEY
+
+  - name: local-archive
+    type: file
+    path: siem-alerts.ndjson
+    min_severity: medium
+
+suppressions:
+  - rule_id: SIEM-101
+    target_contains: 203.0.113.200
+    reason: Authorized weekly security regression runner
+    expires_on: "2027-12-31"

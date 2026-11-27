@@ -1,0 +1,2 @@
+203.0.113.20 - - [27/Nov/2026:10:00:10 +0000] "GET /healthz HTTP/1.1" 200 18 "-" "raksa-healthcheck/1.0"
+203.0.113.21 - - [27/Nov/2026:10:00:25 +0000] "GET /api/v1/status HTTP/1.1" 200 124 "https://portal.example.invalid/" "Mozilla/5.0"

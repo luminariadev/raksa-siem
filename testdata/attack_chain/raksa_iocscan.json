@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "tool": "raksa-iocscan",
+  "layer": "ioc-defense",
+  "generated_at": "2026-11-27T10:01:30Z",
+  "findings": [
+    {
+      "id": "ioc-001",
+      "rule_id": "IOC-001",
+      "module": "process",
+      "layer": "ioc-defense",
+      "severity": "critical",
+      "title": "Suspicious binary execution indicator",
+      "description": "Synthetic indicator detected inside runtime artifact on app-01.",
+      "target": "host://app-01/var/tmp/synthetic-probe.bin",
+      "evidence": {"host": "app-01", "src_ip": "198.51.100.66"},
+      "timestamp": "2026-11-27T10:01:30Z"
+    }
+  ]
+}

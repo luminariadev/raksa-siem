@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "tool": "raksa-netguard",
+  "layer": "network-defense",
+  "generated_at": "2026-11-27T10:01:00Z",
+  "findings": [
+    {
+      "id": "ng-001",
+      "rule_id": "NET-101",
+      "module": "firewall",
+      "layer": "network-defense",
+      "severity": "high",
+      "title": "Blocked inbound SYN port scan burst",
+      "description": "High-rate port probe detected from 198.51.100.66 targeting app-01.",
+      "target": "app-01",
+      "evidence": {"src_ip": "198.51.100.66", "host": "app-01", "dst_port": 22},
+      "timestamp": "2026-11-27T10:01:00Z"
+    },
+    {
+      "id": "ng-002",
+      "rule_id": "NET-102",
+      "module": "lateral",
+      "layer": "network-defense",
+      "severity": "high",
+      "title": "East-west SMB probe to database tier",
+      "description": "Blocked lateral scan from 198.51.100.66 toward db-01.",
+      "target": "db-01",
+      "evidence": {"src_ip": "198.51.100.66", "host": "db-01", "dst_port": 445},
+      "timestamp": "2026-11-27T10:01:05Z"
+    },
+    {
+      "id": "ng-003",
+      "rule_id": "NET-103",
+      "module": "egress",
+      "layer": "network-defense",
+      "severity": "high",
+      "title": "Outbound connection attempt from cache node",
+      "description": "Egress connection attempt blocked from cache-01 associated with 198.51.100.66.",
+      "target": "cache-01",
+      "evidence": {"src_ip": "198.51.100.66", "host": "cache-01", "dst_port": 8443},
+      "timestamp": "2026-11-27T10:01:10Z"
+    }
+  ]
+}

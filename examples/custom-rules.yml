@@ -1,0 +1,27 @@
+min_severity: info
+suppression_window: 10m
+
+custom_rules:
+  - id: ORG-SIEM-401
+    title: Sensitive debug dump keyword observed in telemetry
+    description: Triggers when an unauthorized memory or env dump command is logged.
+    severity: high
+    module: custom
+    mitre_d3fend: D3-DA
+    remediation: Inspect host process tree and revoke exposed runtime session credentials.
+    match:
+      contains: PROC_ENV_DUMP
+
+  - id: ORG-SIEM-402
+    title: Repeated token validation failures by host
+    description: Aggregates bursts of upstream application token validation errors per host.
+    severity: medium
+    module: custom
+    mitre_d3fend: D3-AL
+    remediation: Investigate upstream gateway authentication failures and client replay storms.
+    threshold: 5
+    window: 5m
+    group_by: host
+    match:
+      category: telemetry
+      regex: "(?i)token_(expired|rejected)"

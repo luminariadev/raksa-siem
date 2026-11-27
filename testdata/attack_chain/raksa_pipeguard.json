@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "tool": "raksa-pipeguard",
+  "layer": "devsecops",
+  "generated_at": "2026-11-27T10:01:15Z",
+  "findings": [
+    {
+      "id": "pg-001",
+      "rule_id": "PIPE-004",
+      "module": "iac",
+      "layer": "devsecops",
+      "severity": "high",
+      "title": "Privileged container policy exposed on deployment target",
+      "description": "Workload descriptor for app-01 permits hostPID and root UID.",
+      "target": "host://app-01/deploy/service.yml",
+      "evidence": {"host": "app-01"},
+      "timestamp": "2026-11-27T10:01:15Z"
+    }
+  ]
+}
