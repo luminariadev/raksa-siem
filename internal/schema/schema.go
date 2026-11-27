@@ -12,8 +12,8 @@ const (
 	LayerName     = "siem"
 )
 
-// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-siem/internal/schema.Version=0.1.0".
-var Version = "0.1.0"
+// Version can be overridden at build time via -ldflags "-X github.com/luminariadev/raksa-siem/internal/schema.Version=0.2.0".
+var Version = "0.2.0"
 
 // Severity represents Raksa Schema v1 normalized alert severity levels.
 type Severity string
@@ -232,7 +232,7 @@ func NewReport(findings []Finding) Report {
 	}
 }
 
-// RuleCatalog returns all 20 built-in SIEM-* correlation and detection rules.
+// RuleCatalog returns built-in SIEM-* correlation and detection rules, optionally filtered by module.
 func RuleCatalog(moduleFilter ...string) []RuleInfo {
 	mod := ""
 	if len(moduleFilter) > 0 {
@@ -404,6 +404,16 @@ var builtInRules = []RuleInfo{
 		Description:    "IOCScan malware indicator co-occurred on a host with HostGuard/NetGuard runtime persistence or C2 activity.",
 	},
 	{
+		RuleID:         "SIEM-206",
+		Title:          "Ordered multi-step attack kill-chain sequence correlated",
+		Module:         "correlation",
+		Severity:       SeverityCritical,
+		Standard:       "MITRE ATT&CK Kill Chain / EQL Sequence",
+		MitreD3FEND:    "D3-SCA",
+		MitreTechnique: "Sequential Attack Chain Correlation",
+		Description:    "Grouped telemetry matched an ordered sequence of attack stages inside the configured sliding time window.",
+	},
+	{
 		RuleID:         "SIEM-301",
 		Title:          "Upstream critical Raksa sensor finding escalated",
 		Module:         "ops",
@@ -454,6 +464,16 @@ var builtInRules = []RuleInfo{
 		Description:    "Grouped telemetry events crossed the custom threshold within the rule time window.",
 	},
 	{
+		RuleID:         "SIEM-403",
+		Title:          "Sigma detection rule matched telemetry stream",
+		Module:         "custom",
+		Severity:       SeverityHigh,
+		Standard:       "Sigma Detection Rule",
+		MitreD3FEND:    "D3-SCA",
+		MitreTechnique: "Sigma Signature Correlation",
+		Description:    "Normalized telemetry matched a compiled native Sigma YAML detection or windowed aggregation rule.",
+	},
+	{
 		RuleID:         "SIEM-501",
 		Title:          "Enterprise watchlist hit on monitored IP, host, or user",
 		Module:         "policy",
@@ -462,5 +482,15 @@ var builtInRules = []RuleInfo{
 		MitreD3FEND:    "D3-DA",
 		MitreTechnique: "Watchlist Indicator Correlation",
 		Description:    "Normalized telemetry referenced an IP address, hostname, or user on the configured policy watchlist.",
+	},
+	{
+		RuleID:         "SIEM-502",
+		Title:          "STIX 2.1 or CIDR threat intelligence indicator matched",
+		Module:         "policy",
+		Severity:       SeverityHigh,
+		Standard:       "STIX 2.1 / Threat Intelligence Feed",
+		MitreD3FEND:    "D3-DA",
+		MitreTechnique: "Threat Feed Indicator Match",
+		Description:    "Normalized event matched a malicious IP, CIDR range, domain, hash, or user from an external threat intel feed.",
 	},
 }

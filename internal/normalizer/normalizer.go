@@ -58,8 +58,20 @@ func ParseFormat(raw string) (string, error) {
 		return FormatJSONL, nil
 	case FormatCEF:
 		return FormatCEF, nil
+	case FormatAuditd, "audit":
+		return FormatAuditd, nil
+	case FormatCloudTrail, "aws-cloudtrail":
+		return FormatCloudTrail, nil
+	case FormatK8sAudit, "k8s", "kubernetes":
+		return FormatK8sAudit, nil
+	case FormatSuricata, "suricata-eve", "eve":
+		return FormatSuricata, nil
+	case FormatWinEVTX, "evtx", "windows":
+		return FormatWinEVTX, nil
+	case FormatLEEF:
+		return FormatLEEF, nil
 	default:
-		return "", fmt.Errorf("unsupported input format %q: expected auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, or cef", raw)
+		return "", fmt.Errorf("unsupported input format %q: expected auto, raksa, raksa-ndjson, auth, syslog, nginx, jsonl, cef, auditd, cloudtrail, k8s-audit, suricata, win-evtx, or leef", raw)
 	}
 }
 
@@ -93,6 +105,10 @@ func ParseReader(r io.Reader, format string, sourceName string) ([]schema.Event,
 	if err != nil {
 		return nil, stats, fmt.Errorf("read telemetry %s: %w", sourceName, err)
 	}
+	rawBytes, err = decompressIfGzip(rawBytes, sourceName)
+	if err != nil {
+		return nil, stats, err
+	}
 	if len(rawBytes) <= maxEnvelopeBytes {
 		trimmed := bytes.TrimSpace(rawBytes)
 		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') &&
@@ -101,6 +117,14 @@ func ParseReader(r io.Reader, format string, sourceName string) ([]schema.Event,
 				stats.LinesRead = strings.Count(string(trimmed), "\n") + 1
 				stats.EventsParsed = len(evs)
 				stats.ByFormat[FormatRaksa] = len(evs)
+				return evs, stats, nil
+			}
+		}
+		if len(trimmed) > 0 && trimmed[0] == '{' {
+			if evs, matched := tryParseEnterpriseEnvelope(trimmed, normFmt, sourceName); matched {
+				stats.LinesRead = strings.Count(string(trimmed), "\n") + 1
+				stats.EventsParsed = len(evs)
+				stats.ByFormat[FormatCloudTrail] = len(evs)
 				return evs, stats, nil
 			}
 		}
@@ -250,13 +274,25 @@ func ParseLine(line string, format string, defaultYear int) ([]schema.Event, boo
 	}
 
 	if normFmt == FormatRaksa || normFmt == FormatRaksaNDJSON {
-		return parseJSONLine(line, true)
+		return parseJSONLine(line, true, normFmt)
 	}
-	if normFmt == FormatJSONL {
-		return parseJSONLine(line, false)
+	if normFmt == FormatJSONL || normFmt == FormatCloudTrail || normFmt == FormatK8sAudit || normFmt == FormatSuricata || normFmt == FormatWinEVTX {
+		return parseJSONLine(line, false, normFmt)
 	}
 	if normFmt == FormatCEF {
 		if ev, ok := parseCEFLine(line, defaultYear); ok {
+			return []schema.Event{ev}, true
+		}
+		return nil, false
+	}
+	if normFmt == FormatLEEF {
+		if ev, ok := parseLEEFLine(line); ok {
+			return []schema.Event{ev}, true
+		}
+		return nil, false
+	}
+	if normFmt == FormatAuditd {
+		if ev, ok := parseAuditdLine(line); ok {
 			return []schema.Event{ev}, true
 		}
 		return nil, false
@@ -280,14 +316,24 @@ func ParseLine(line string, format string, defaultYear int) ([]schema.Event, boo
 		return nil, false
 	}
 
-	// Auto-detection order: JSON -> CEF -> Nginx -> Syslog/Auth
+	// Auto-detection order: JSON -> CEF -> LEEF -> Auditd -> Nginx -> Syslog/Auth
 	if strings.HasPrefix(line, "{") {
-		if evs, ok := parseJSONLine(line, false); ok {
+		if evs, ok := parseJSONLine(line, false, FormatAuto); ok {
 			return evs, true
 		}
 	}
 	if strings.Contains(line, "CEF:") {
 		if ev, ok := parseCEFLine(line, defaultYear); ok {
+			return []schema.Event{ev}, true
+		}
+	}
+	if strings.Contains(line, "LEEF:") {
+		if ev, ok := parseLEEFLine(line); ok {
+			return []schema.Event{ev}, true
+		}
+	}
+	if strings.Contains(line, "msg=audit(") {
+		if ev, ok := parseAuditdLine(line); ok {
 			return []schema.Event{ev}, true
 		}
 	}
@@ -300,7 +346,7 @@ func ParseLine(line string, format string, defaultYear int) ([]schema.Event, boo
 	return nil, false
 }
 
-func parseJSONLine(line string, requireRaksa bool) ([]schema.Event, bool) {
+func parseJSONLine(line string, requireRaksa bool, normFmt string) ([]schema.Event, bool) {
 	if !strings.HasPrefix(line, "{") {
 		return nil, false
 	}
@@ -331,6 +377,14 @@ func parseJSONLine(line string, requireRaksa bool) ([]schema.Event, bool) {
 		}
 	}
 	if requireRaksa {
+		return nil, false
+	}
+
+	// 3. Enterprise JSON schemas (CloudTrail, K8s Audit, Suricata EVE, Windows EVTX JSON)
+	if evs, ok := tryParseEnterpriseJSONMap(raw, line, normFmt); ok {
+		return evs, true
+	}
+	if normFmt != FormatAuto && normFmt != FormatJSONL {
 		return nil, false
 	}
 

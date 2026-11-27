@@ -7,8 +7,8 @@ import (
 
 func TestRuleCatalogAndPostureScoring(t *testing.T) {
 	rules := RuleCatalog()
-	if len(rules) != 20 {
-		t.Fatalf("expected 20 built-in rules, got %d", len(rules))
+	if len(rules) != 23 {
+		t.Fatalf("expected 23 built-in rules, got %d", len(rules))
 	}
 
 	seen := make(map[string]bool)
@@ -25,8 +25,10 @@ func TestRuleCatalogAndPostureScoring(t *testing.T) {
 	if got := RuleCatalog("auth"); len(got) != 5 {
 		t.Fatalf("expected 5 auth rules, got %d", len(got))
 	}
-	if _, ok := LookupRule("SIEM-201"); !ok {
-		t.Fatal("expected SIEM-201 in catalog")
+	for _, rid := range []string{"SIEM-201", "SIEM-206", "SIEM-403", "SIEM-502"} {
+		if _, ok := LookupRule(rid); !ok {
+			t.Fatalf("expected %s in catalog", rid)
+		}
 	}
 
 	clean := ComputePosture(nil)
