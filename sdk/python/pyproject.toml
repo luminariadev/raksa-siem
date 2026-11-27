@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "raksa-siem-sdk"
+version = "0.1.0"
+description = "Zero-dependency Python SDK for Raksa SIEM log normalization, correlation, and HTTP ingest."
+readme = "../../README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "luminariadev", email = "rizkianuari83@gmail.com" },
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/luminariadev/raksa-siem"
+Repository = "https://github.com/luminariadev/raksa-siem"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
